@@ -1,0 +1,273 @@
+* Variables
+About the extension variables:
+1. =tlt-aux-regexp-base=: Assume the file we want to compile is =example.org=. Now all files which start with "example" and end with one of the extensions specified in =tlt-aux-regexp-base= will be moved. Examples are =example.toc= and =example.14.vrb=. This is useful for some files which are numbered.
+2. =tlt-aux-regexp-free=: Anything matching the regular expression is moved, regardless of the base-name. For example, if =.toc= is in there, not just =example.toc= but also =agenda.toc= is moved. This is helpful for files like =preamble.fmt=.
+
+The self-documentation should suffice for the other variables. By default, all features are activated.
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-tidy-dir.el
+  (defcustom tlt-tidy-aux-org 'all
+    "Whether to automatically create a sub-folder in which the auxiliary files are placed
+        when exporting from `.org' to `.pdf' via LaTeX. If non-nil, set `org-latex-remove-logfiles' to nil.
+        Further, if set to t, move all files matching one of the extensions specified by
+        `org-latex-logfiles-extensions' to that folder. If 'all, move any LaTeX extension there. 
+    If nil, set to nil, do not move any files. See `tlt-org-latex-export-to-pdf' for more information."
+    :group 'tlt-utils)
+
+  (defcustom tlt-tidy-aux-tex 'all
+    "Whether to automatically create a sub-folder in which the auxiliary files are placed
+        when compiling a `.tex' file. If non-nil, set `org-latex-remove-logfiles' to nil.
+        If set to t, move all files matching one of the extensions specified by 
+        `org-latex-logfiles-extensions' to that folder. If set to 'all, move any LaTeX 
+        extension there. If nil, set to nil, do not move any files.  see `tlt-aux-regexp-base'."
+    :group 'tlt-utils)
+
+  (defcustom tlt-move-tex-to-aux-files t
+    "Whether to also move the .tex file to the auxiliary directory or not
+        when exporting from `.org' to `.tex'."
+    :group 'tlt-utils)
+
+  (defcustom tlt-auxdir-name "auxiliary files/"
+    "Name of the subdirectory created upon export from org to LaTeX;
+        see `tlt-org-latex-export-to-pdf'"
+    :group 'tlt-utils)
+
+  (defcustom tlt-aux-regexp-free '("preamble.fmt$" "preamble.log" "xelatex$") ; replace tlt-aux-regexp-base
+    "Any file matching one of these regexps is moved."
+    :group 'tlt-utils)
+
+  (defvar tlt-aux-regexp-base '("run.xml" "ind" "ilg" "lof" "lot" "tex~" "aux" "idx"
+                                "log" "out" "toc" "nav" "snm" "vrb" "dvi" "fdb_latexmk"
+                                "blg" "brf" "fls" "entoc" "ps" "spl" "bbl" "bcf" "synctex.gz" 
+                                "ldf" "tfm" "pk" "gf" "pl" "mf" "vf" "vpl" "pfb" "afm" "map" "enc"
+                                "fd"  "mtx" "etx" "gls" "glo" "glg" "acr" "acn" "alg" "ent" "gst"
+                                "ist" "loa" "snm" "vrb" ".out.ps" "w18" "mtc" "mld" "mlo" "thm"
+                                "xref" "4ct" "4tc" "tpt" "tpm" "tno" "los" "emd" "enx" "ent"
+                                "auxx" "hd" "idv" "lg" "url" "ttt" "fff" "rsp.aux" "ovr" "lbl"
+                                "ctn" "emd" "enx" "cb" "cb2" "sbb" "filelist" "scn" "abb" "BibTeX.txt"
+                                "upa" "upb")
+    "Files ending in one of these regexps are only moved if they 
+        also start with the `.org' file's basename. (Almost) all auxiliary file extensions that LaTeX produces;
+        see https://github.com/wspr/latex-auxfiles/blob/master/auxfiles.tex")
+#+END_SRC
+* Preliminary functions
+** Functions for constructing regular expressions
+For finding the correct regular expression, there were two culprits to spoil the party:
+1. In =tlt-concat-aux-regexps=, the trailing =\\|= at the end of the regular expression, which makes it match /anything/.
+2. In =tlt-find-files-regexp=, directory dots =.= and =..=, which are always members of the list that results in evaluating =directory-files=.
+They are taken care of by =compat-string-trim-right= and =cl-set-difference=, respectively.
+
+The regular expression used is ="^Example[^ $]*\\(toc\\|tex\\)$"=. It basically means: 
+1. The file name must start with "Example".
+2. "Example" is followed by any sequence of characters (possible no character at all).
+3. After that, it must end with one of the endings "toc" or "tex".
+
+The =.= between the base-name and the extension is also matched by =[^ $]*=, so we don't add it explicitly (although we could, it just wouldn't make a difference).
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-tidy-dir.el 
+  (defun tlt-concat-aux-regexps (list)
+    "Make a distjunctive regular expression of the elements of LIST."
+    (compat-string-trim-right ; to trim of the last "\\|"; else RE matches everything!
+     (let ((value))
+       (dolist (element list value)
+         (setq value (concat element "\\|" value)
+               ))) 
+     "\\\\|"))
+
+  (defun tlt-regexp-base-name (basename exts) 
+    "Return the regexp matching any file name
+    starting with BASENAME and ending with one of EXTS."
+    (format "^%s[^ $]+\\(%s\\)$" basename 
+            (tlt-concat-aux-regexps exts)))
+#+END_SRC
+** finding and moving files matching a regexp
+The idea here is straightforward: =tlt-find-files-regexp= returns a list of the files to move by checking which files are matched by the regular expression constructed by the functions above. Then, we need a function to move these files. =tlt-move-files-regexp= combines both functionalities by making use of =tlt-find-files-regexp=.
+
+Using =-flatten= in =tlt-find-files-regexp= makes all the occurrences of =nil= in the list resulting from =mapcar= disappear. =rename-file= works just like =mv= in =bash=.
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-tidy-dir.el
+  (defun tlt-find-files-regexp (re &optional dir)
+    "Return a list of all files in RE matching DIR.
+      If DIR is not provided, resort to the current buffer's directory."
+    (let* ((dir (if dir 
+                    dir
+                  (file-name-directory (buffer-file-name))))
+           (dirfiles (directory-files dir))
+           (files (cl-set-difference dirfiles '("." ".."))))
+      (-flatten (mapcar (lambda (x) 
+                          (when (string-match re x) 
+                            x)) 
+                        files))))
+
+  (defun tlt-move-files-regexp (re dir1 dir2)
+    "Move all files in DIR1 matching RE into DIR2."
+    (mapcar (lambda (x) 
+              (rename-file (expand-file-name x dir1) dir2 t))
+            (tlt-find-files-regexp re dir1))) ; apply it to the list of regexp matches
+#+END_SRC
+* Moving auxiliary files
+With the above functions in place, we now have all necessary tools to construct our main function. The idea is straight forward:
+1. Only run the function of =tlt-tidy-aux-tex= (or =tlt-tidy-aux-org= if in =org-mode=) is =non-nil=. e
+2. Construct a regular expression (=regexp-final=) which matches 
+   1. any string starting with the file's basename and ending with
+      1. an extension of =tlt-aux-regexp-base=, if =tlt-tidy-aux-tex= is ='all=.
+      2. an extension of =org-latex-logfiles-extensions=, if =tlt-tidy-aux-tex= (or =tlt-tidy-aux-org= if in =org-mode=) is =non-nil= but not ='all=.
+   2. containing one of the regular expressions specified by =tlt-aux-regexp-free=.
+   3. the =minted= folder corresponding to the file at hand.
+3. Create a list of files in the directory.
+4. Filter out those files matching one of =regexp-final=.
+5. Move those files according to =direction=:
+   1. If =direction= is ='up=, move the files up, that is from the auxiliary directory to the main folder.
+   2. If =direction= is not ='up= (but =non-nil=),
+      1. create the auxiliary folder if not existent yet 
+      2. move the files down, that is from the main folder to the auxiliary folder.
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-tidy-dir.el
+  (defun tlt-utils-move-aux-files (direction)
+    "If DIRECTION is 'up, move all auxiliary files in the main folder. Else move them in the subfolder.
+  If the subfolder does not exist, createit before moving. 
+  The sub folder name is specified by `tlt-auxdir-name.'"
+    (when tlt-tidy-aux-tex                                                           ; only run if `tlt-tidy-aux-tex' is non-nil
+      (let* ((basename (file-name-base (buffer-file-name)))
+             (direct (file-name-directory buffer-file-name))                       ; name of the current directory (working directory)
+             (aux-dir (expand-file-name                                            ; the path of the sub-folder containing the auxilary files
+                       (file-name-as-directory tlt-auxdir-name) direct))           ; is the concatenation of current directory and the value of `tlt-auxdir-name', ensuring backslash!
+             (aux-extension-var (if (equal tlt-tidy-aux-tex 'all)                  ; the variable to use for the LaTeX extensions is
+                                    tlt-aux-regexp-base                    ; `tlt-aux-regexp-base' if `tlt-tidy-aux-org' is set to 'all
+                                  org-latex-logfiles-extensions))                  ; and `org-latex-logfiles-extensions' else; the nil-case is excluded by `tlt-auxiliary-files-org'
+             (aux-extension-regexp (tlt-regexp-base-name basename aux-extension-var))      ; regexp dependent on file name
+             (aux-free-regexp (tlt-concat-aux-regexps tlt-aux-regexp-free))           ; regexp independent of file name 
+
+             (minted-regexp (concat "_minted-" (s-replace-regexp                ; a list of the minted folder's name is "_minted-" plus
+                                                " " "_"  (file-name-base (buffer-file-name))))) ; the .org file's usual basename, but with underscores replacing whitespace
+
+             (regexp-final (format "\\(\\(%s\\)\\|\\(%s\\)\\)\\|\\(%s\\)" 
+                                   aux-extension-regexp 
+                                   aux-free-regexp
+                                   minted-regexp))
+
+             (idx-file nil) 
+             (element nil))
+
+        ;;  move the files out, or create the subdirectory ;;
+
+        (unless                                                       ; if the aux-dir does not exist yet
+            (file-directory-p aux-dir)                                            ; create it
+          (mkdir aux-dir))
+
+        (if (equal direction 'up)                                 ; if 'up is provided
+            (tlt-move-files-regexp regexp-final aux-dir direct)   ; box the files up
+          (tlt-move-files-regexp regexp-final direct aux-dir)))    ; else move the files down                 
+      nil)) ; and return nil (remember this function also serves as a hook)
+#+END_SRC
+* Boxing up your auxiliary files
+Once our =.tex= file is compiled, we usually find a huge amount (sometimes up to 20!) auxiliary files in our folder. In most cases, these files are only interesting for the next =LaTeX= run, so if =LaTeX= is not running, we won't need them. So let's put them in a subdirectory to keep things tidy!
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-tidy-dir.el
+  (defun tlt-utils-box-up-aux-files (_)
+    (interactive "p")
+    "Move all LaTeX auxiliary files into a subfolder. If such a folder does not exist, create it first. 
+  The subfolder's name is specified by `tlt-auxdir-name'; see `tlt-utils-move-aux-files'."        
+    (tlt-utils-move-aux-files 'down))
+#+END_SRC
+* Boxing up your auxiliary files
+If we have used this utility before, we will find ourselves in a situation where all auxiliary files are stored in a subdirectory. To use them while compiling a =.tex= file, we need to get them in the same directory as that file, though. In other words: We need to move the auxiliary files out of the subfolder and into the main folder. This is what =tlt-utils-box-up-aux-files= does.
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-tidy-dir.el
+  (defun tlt-utils-unbox-aux-files ()
+    (interactive)
+    "Move the relevant axuiliary files from the subfolder specified by `tlt-auxdir-name' to the main folder of the current file.
+  The relevant auxfiles are determined by `tlt-aux-regexp-free' and, in addition, 
+  `tlt-aux-regexp-base' or `org-latex-logfiles-extensions', depending on `tlt-tidy-aux-org' 
+  if in org-mode and `tlt-tidy-aux-tex' if in TeX-mode; see `tlt-utils-move-aux-files'."
+    (tlt-utils-move-aux-files 'up))
+#+END_SRC
+* Function for org-mode
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-tidy-dir.el
+  (defun tlt-org-latex-compile (fun texfile &optional snippet)
+    "Work just like `org-latex-compile' but create a sub-directory 
+        in which all the auxiliary files necessary for compiling the
+        TeX-document are stored. If such a directory already exists,
+        use the files in there to compile the `.tex'-file. Provides the same
+        functionality as `tlt-utils-box-up-aux-files' and `tlt-utils-unbox-aux-files'
+        provide for `.tex' files. "
+    (let ((tlt-tidy-aux-tex tlt-tidy-aux-org)) ; here, `tlt-tidy-aux-org' is the relevant variable
+      (if tlt-move-tex-to-aux-files 
+
+          ;; if the `.tex' file should be moved ;;
+
+          (let ((tlt-aux-regexp-free 
+                 (append (list (org-export-output-file-name ".tex"))  ; add the `.tex' file to the free regexps to make sure it is moved
+                         tlt-aux-regexp-free)))
+            (prog1                              ; because we need the output of `org-latex-compile'
+                (funcall fun texfile snippet)
+              (tlt-utils-move-aux-files 'down)))
+
+        ;; if the `.tex' file should not be moved ;;
+
+        (tlt-utils-move-aux-files 'up)
+        (prog1                               ; because we need the output of `org-latex-compile'
+            (funcall fun texfile snippet)
+          (tlt-utils-move-aux-files 'down)))))
+#+END_SRC
+* Functions to toggle functionality
+Since we have custom variables to toggle specific functionalities on or off, we need to take care of that when activating a minor-mode. The below code does just that.
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-tidy-dir.el
+  (defun tlt-auxiliary-files-org-add-advice-maybe ()
+    "Tell org how to handle auxiliary files while
+  exporting, depending on the value of `tlt-tidy-aux-org'."
+    (when tlt-tidy-aux-org                       
+      (advice-add 'org-latex-compile :around 
+                  #'tlt-org-latex-compile)))   
+
+  (defun tlt-auxiliary-files-org-remove-advice ()
+    "Tell org how to handle auxiliary files while
+  exporting, depending on the value of `tlt-tidy-aux-org'."
+    (advice-remove 'org-latex-compile      
+                   #'tlt-org-latex-compile)) ; just returns nil if there is no advice to remove
+
+  (defun tlt-utils-box-up-aux-files-wrapper (name file &optional result)
+    "Wrapper for `tlt-utils-box-up-aux-files' to make it
+          compatible with TeX sentinel functions. 
+          Optional RESULT for `TeX-synchronous-sentinel'."
+    (tlt-utils-box-up-aux-files nil))
+
+  (defun tlt-utils-unbox-aux-files-wrapper (name file-fn &optional override-confirm)
+    "Wrapper for `tlt-utils-unbox-aux-files'. 
+          Makes it compatible with `TeX-command'."
+    (unless TeX-command-next (tlt-utils-unbox-aux-files)))
+
+          ;;; TeX-run-command ausprobieren, darauf basieren die ja alle!
+                                          ; (advice-add 'TeX-command      :before #'tlt-utils-unbox-aux-files)
+  (defun tlt-auxiliary-files-tex-add-advice-maybe ()
+    "Add advice for TeX-functions to support (un-)boxing auxiliary files."
+    (when tlt-tidy-aux-tex
+      ;; Advice to move files out before running LaTeX/BibTeX/biber etc. ;;
+      (advice-add 'TeX-command :before #'tlt-utils-unbox-aux-files-wrapper) 
+      ;; Advices to move fils back in again after running LaTeX/BibTeX/biber etc. ;;
+                                          ; (advice-add 'LaTeX-auto-cleanup :before #'tlt-utils-box-up-aux-files)
+      (add-hook 'TeX-after-compilation-finished-functions #'tlt-utils-box-up-aux-files) ; working for TeX/LaTex runs, but not for bibtex etc.
+      (advice-add 'TeX-synchronous-sentinel :before #'tlt-utils-box-up-aux-files-wrapper) ; if process is synchronous
+      (advice-add 'TeX-command-sequence-sentinel :after #'tlt-utils-box-up-aux-files-wrapper) ; if `TeX-command-sequence' is called
+      (advice-add 'TeX-BibTeX-sentinel   :before #'tlt-utils-box-up-aux-files-wrapper)
+      (advice-add 'TeX-Biber-sentinel    :before #'tlt-utils-box-up-aux-files-wrapper)
+      (advice-add 'TeX-index-sentinel    :before #'tlt-utils-box-up-aux-files-wrapper)
+      (advice-add 'TeX-dvips-sentinel    :before #'tlt-utils-box-up-aux-files-wrapper)
+      (advice-add 'TeX-dvipdfmx-sentinel :before #'tlt-utils-box-up-aux-files-wrapper)
+      (advice-add 'TeX-ps2pdf-sentinel   :before #'tlt-utils-box-up-aux-files-wrapper)
+      ))
+
+  (defun tlt-auxiliary-files-tex-remove-advice ()
+    "Remove the advices issued by `tlt-auxiliary-files-tex-add-advice-maybe'."
+    ;; Advice to move files out before running LaTeX/BibTeX/biber etc. ;;
+    (advice-remove 'TeX-command #'tlt-utils-unbox-aux-files-wrapper) 
+    ;; Advices to move fils back in again after running LaTeX/BibTeX/biber etc. ;;
+    (remove-hook 'TeX-after-compilation-finished-functions #'tlt-utils-box-up-aux-files) 
+    (advice-remove 'TeX-synchronous-sentinel #'tlt-utils-box-up-aux-files-wrapper) 
+    (advice-remove 'TeX-command-sequence-sentinel #'tlt-utils-box-up-aux-files-wrapper)
+    (advice-remove 'TeX-BibTeX-sentinel    #'tlt-utils-box-up-aux-files-wrapper)
+    (advice-remove 'TeX-Biber-sentinel     #'tlt-utils-box-up-aux-files-wrapper)
+    (advice-remove 'TeX-Biber-sentinel     #'tlt-utils-box-up-aux-files-wrapper)
+    (advice-remove 'TeX-index-sentinel     #'tlt-utils-box-up-aux-files-wrapper)
+    (advice-remove 'TeX-dvips-sentinel     #'tlt-utils-box-up-aux-files-wrapper)
+    (advice-remove 'TeX-dvipdfmx-sentinel  #'tlt-utils-box-up-aux-files-wrapper)
+    (advice-remove 'TeX-ps2pdf-sentinel    #'tlt-utils-box-up-aux-files-wrapper))
+
+(provide 'tlt-tidy-dir)
+
+;; tlt-tidy-dir.el ends here ;;
+#+END_SRC

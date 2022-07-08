@@ -1,0 +1,120 @@
+* Variables
+The descriptions of the variables should be self-explanatory.
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-run-biber.el
+  (defcustom org-biber-show-compilation t
+    "Whether to show biber output buffer while compiling."
+:group 'tlt)
+
+  (defvar org-biber-process nil
+    "Stores last process created by calling biber. 
+      For internal use only.")
+#+END_SRC
+* Get the file to be run with biber
+The main idea is the following:
+1. Get the name of the =.tex=-file
+2. If it exists, use it, if not, create one by exporting the =.org= file.
+3. Check whether the =.bcf= file needed to run =biber= exists -- either in the parent or in the auxiliary folder.
+   1. If it does exist, return it.
+   2. If it does not, ask for a =LaTeX= run.
+      1. If the user agrees, create the =.tex= file and check whether the =.bcf= file exists now
+         1. If it does exist, return it.
+         2. If it does not exist, leave a message.
+      2. If the user does not agree, stop the command.
+
+Note:
+1. =biber= does /not/ run if the =.tex= extension still sticks to the file. It only runs if either a =.bcf= extension is provided, or none at all.
+2. =prin1-to-string= is needed to escape the quotation marks; else the =biber= command wouldn't be able to run on files with spaces in their path.
+
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-run-biber.el :results none
+  (defun tex-file-get-create (&optional opt1 opt2)
+    "Get or create the `.tex' file corresponding to the current buffer's `.org' file.
+         If the search is unsuccessful, create a `.tex' file. If there
+      is no `.bcf' file, ask whether to run TeX to create it. Return the `.tex' file's name."
+    ;; temporariy variables
+    (let* ((dir (file-name-directory (buffer-file-name)))
+           (texname (org-export-output-file-name ".tex")) ; without path
+           (texfile (expand-file-name texname dir))
+           (bound-aux (boundp 'tex-auxdir-name))
+           (bcf (org-export-output-file-name ".bcf")) ; without path
+           (TeX-command-sequence-max-runs-same-command 1)) ; do not repeat commands
+      ;; check `.tex' file ;;
+      (if (file-exists-p texfile) texfile
+        (org-latex-export-to-latex))
+      ;; check `.bcf' file ;;
+      (cond ((and bound-aux ; variable is bound
+                  (file-exists-p (concat dir tex-auxdir-name bcf))) ; and bcf exists in auxdir
+             (prin1-to-string (concat dir tex-auxdir-name bcf))) ; first possible output: auxdir path  bcf
+
+            ((file-exists-p bcf) (prin1-to-string bcf)) ; second possible output: parent folder path to bcf
+
+            (t (if 
+                   (yes-or-no-p "Necessary .bcf file does not exist. Run LaTeX to create it first?") ;  ask to create such a file.
+                   (progn 
+                     (org-latex-export-to-pdf) ; third possible output: no `.bcf', so creat it!
+
+                     (if (or 
+                          (when bound-aux (file-exists-p (concat dir tex-auxdir-name bcf)))
+                          (file-exists-p bcf))
+                         (prin1-to-string  ;  escape quotation marks for the biber command to work
+                          (or (concat dir tex-auxdir-name bcf) bcf))     ; (TeX-strip-extension texfile) ; strip extension bc biber only handles`.bcf' or none
+                                          ; `org-latex-export-to-latex' evaluates to the file name already
+                       (error "No .bcf file was produced. Did you forget to include your .bib file?"))) ; else give out message
+
+                 (error "Command aborted.")))))) ; else abort the compilation
+#+END_SRC
+* Actual =biber= call
+The most important part about this function is that =TeX-expand-list-builtin= is temporarily changed. The =biber= command is given in abbreviated form (see =TeX-command-list=) and afterwards expanded by =TeX-expand-list= on the basis of =TeX-expand-list-builtin=. Here, =%s=, which takes the position of the file name in the =biber= shell-command, is given by =TeX-active-master-with-quotes=, which acts on the /current/ buffer. But the current buffer is an =.org= file, so =biber= won't run correctly. For this reason, the value of =%s= is changed to that of =tex-file-get-create=. In other words, it allows =biber= to run on a file different from the one displayed in emacs.
+
+In addition, the wrong bindings from =TeX= are shown in the command line. This is because both =TeX-command-run= and =TeX-Biber-sentinel= use the command =substitute-command-keys= on the =TeX-mode-map=. Thus, in both, functions, we temporarily redefine =substitute-command-keys= to return the bindings to show the =biber= output defined in the =tlt-TeX-utils-map=.
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-run-biber.el
+  (defun org-call-biber () 
+    "Run biber on the `.tex' file corresponding to the current buffer's `.org' file and return process.
+              If there is no such file, create it. If there is no `.bcf' file, ask for a LaTeX run first;
+            see `tex-file-get-create'."
+    (interactive)
+    (let ((TeX-expand-list-builtin ; replace file name function in biber call
+           (add-to-list 'TeX-expand-list-builtin '("%s" tex-file-get-create nil t))) ; prepending to list works: old entry further down is ignored
+          (TeX-show-compilation org-biber-show-compilation) ; own variable whether to show output directly
+          (TeX-command-sequence-max-runs-same-command 1) ; only run once
+          (binding (substitute-command-keys                                     ;  store the command bindings
+                    "\\<tlt-TeX-utils-map>\\[tlt-tex-switch-to-biber-ouput]"))) ;  of the buffer switch command
+      (cl-letf (((symbol-function 'substitute-command-keys) (lambda (string &optional noface) binding))) ; and return it when `substitute-command-keys' is called
+        (setq org-biber-process (TeX-command "Biber" #'tex-file-get-create))))) ; store the process returned to make it accessible later on
+#+END_SRC
+* Functions to run after =biber= was called
+** The org-biber-sentinel
+=org-call-biber= runs =TeX-command=, which calls the function defined in =TeX-command-list=. In the case of =biber=, that is =TeX-run-Biber=. =TeX-run-Biber= now calls =TeX-run-command= to create a process and execute the actual =shell= command in order to then run the sentinel-function =TeX-Biber-sentinel= on that process afterwards. =TeX-Biber-sentinel= in turn provides information in the mini-buffer as to whether the run was successful or not, and how many errors or warnings there were. 
+
+The extra information is very nice, so we want that function, but it also uses =substitute-command-keys= to display the key binding of a =TeX-mode=-specific function. In order to get the bindings right, we will, as we have done above, temporarily adjust =substitute-command-keys=. The resulting function is a wrapper for =TeX-Biber-sentinel=, which will be advised if =tlt-utils-mode= is turned on.
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-run-biber.el
+  (defun tlt-org-biber-sentinel-wrapper (fun process name)
+    "Show the correct key bindings to open the biber output buffer in org-mode.
+    Wrapper for `TeX-Biber-sentinel'."
+    (if (derived-mode-p 'org-mode)
+        (let ((binding (substitute-command-keys                                 ; see above, same procedure
+                        "\\<tlt-TeX-utils-map>\\[tlt-tex-switch-to-biber-ouput]")))
+          (cl-letf (((symbol-function 'substitute-command-keys) (lambda (string &optional noface) binding)))
+            (funcall fun process name)))
+      (funcall fun process name)))
+#+END_SRC
+** Switching to the output buffer
+If a =biber= run did not go as expected, one might want to have a look at its =.log= file, which can be found in the process buffer. The function below does just that: switch to the output buffer. Since =org-call-biber= stores the process in =org-biber-process=, we will only need to get the respective buffer from that process and show it. 
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-run-biber.el
+  (defun tlt-tex-switch-to-biber-output ()
+(interactive)
+    "Display the buffer containing the output from biber.
+  Infom about the file on which biber ran."
+    (let* ((buf (process-buffer org-biber-process))
+           (bufname (buffer-name buf))
+           (name (nth 1 (split-string bufname "\""))))
+      (prog1
+          (message (format "Output from biber call on %s" name))
+        (display-buffer buf))))
+#+END_SRC
+* Bringing it all together
+
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-run-biber.el
+(provide 'tlt-run-biber)
+
+;; tlt-run-biber ends here ;;
+#+END_SRC

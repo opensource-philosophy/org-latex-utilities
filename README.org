@@ -1,0 +1,53 @@
+* tlt-utils
+TL;DR: =tlt-utils= is an Emacs package written in an effort to make file management, exporting your =.org= documents and compiling your =.tex= documents more convenient. In summary, =tlt-utils= adds the following interactive functions:
+
+#+ATTR_HTML: :class center
+| function name            | functionality                            | mode(s)          |
+|--------------------------+------------------------------------------+------------------|
+| tlt-org-run-biber        | run =biber= from your =.org= file            | =org=              |
+| tlt-compile-beamer-frame | compile single =beamer= frames for preview | =org-beamer=       |
+| tlt-precompile-preamble  | precompile your document's preamble      | =TeX=, =org=         |
+| tlt-remove-OCLCs-auto    | remove your =.bib= files' OCLCs            | =TeX=, =org=, =bibtex= |
+
+In addition, all auxiliary files needed for the =LaTeX= compilation are stored in a subfolder after compiling and moved to the main folder right before compiling. This way, your folder stays nice and tidy while =LaTeX= can still make use of (some of) the already existing aux files. For differences to =org-latex-remove-logfiles=, see the section on [[*Keeping your Folder Tidy][Keeping your Folder Tidy]].
+
+Note that by default, no command provided by this package is bound to a key. This is because =tlt-utils= is neither a global nor a major-mode-specific package; it has functions for =TeX-mode= and =org-mode= alike. For instructions on how to adjust the keybindings to your liking, see [[*Binding the functions][Binding the functions]].
+* Installation
+** Automatic Installation (via quelpa)
+The package can be installed using [[https://github.com/quelpa/quelpa][quelpa]] like this:
+
+#+BEGIN_SRC emacs-lisp
+(quelpa '(tlt-utils :fetcher github :repo "opensource-philosophy/tlt-utils"))
+#+END_SRC
+** Manual Installation
+To install =tlt-utils= manually, download/clone the repository to a directory of your choice and add this directory to your =load-path=. Lastly, autoload the commands you want to use:
+
+#+BEGIN_SRC emacs-lisp
+(add-to-list 'load-path "/path/to/tlt-utils-dir")
+(autoload 'tlt-utils "tlt-utils" nil t)
+(autoload 'tlt-copy-region-unicode-to-LaTeX  "tlt-utils" nil t)
+(autoload 'tlt-paste-region-unicode-to-LaTeX "tlt-utils" nil t)
+(autoload 'tlt-copy-region-LaTeX-to-unicode  "tlt-utils" nil t)
+(autoload 'tlt-paste-region-LaTeX-to-unicode "tlt-utils" nil t)
+#+END_SRC
+
+* Features
+** Keeping your Folder Tidy
+[[https://github.com/opensource-philosophy/tlt-utils/blob/main/GIFs/tidy-directory.gif]]
+** Removing OCLCs
+[[https://github.com/opensource-philosophy/tlt-utils/blob/main/GIFs/OCLCs.gif]]
+** Precompiling Preambles
+** Compiling Single =beamer= Frames
+** Running =biber= From Your =.org= File
+* An Example Configuration Using =use-package=
+** The Most Important Custom Variables
+* Configuration
+** Assigning Custom Keybindings
+** An Example =use-package= Configuration
+#+BEGIN_SRC elisp :exports code
+  (use-package tlt-utils
+    :hook ((org-mode . tlt-utils-org-mode) 
+           (TeX-mode . tlt-utils-org-mode))
+    :config )
+#+END_SRC
+This configuration automatically enables =tlt-utils-org-mode= in =.org= documents and =tlt-utils-TeX-mode= in =.tex= documents. It also adds two custom colors:

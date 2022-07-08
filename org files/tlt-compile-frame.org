@@ -1,0 +1,231 @@
+* Variables
+** Removing Files
+Compiling a single frame produces quite some auxiliary files which can mess up your folder. =tlt-remove-frame-files= and =tlt-remove-frame-pdf= let you handle which files to delete after compilation. To be exact, here is a table: 
+
+| =tlt-remove-frame-pdf= set to =nil= | =tlt-remove-frame-pdf= set to =non-nil=               | (=tlt-remove-frame-files= set to =nil=) |
+| delete all compilation files    | delete all compilation files except the =.pdf= file | do not remove any files             |
+
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-compile-frame.el
+  (defcustom tlt-remove-frame-files t 
+    "Whether or not to remove the files necessary to compile the single-frame PDF."
+    :group 'tlt-utils)
+
+  (defcustom tlt-remove-frame-pdf nil 
+    "Whether or not to also remove the `.pdf' file of the single-frame."
+    :group 'tlt-utils)
+#+END_SRC
+** A Quick =LaTeX= Command
+Often times when exporting with =org=, one uses a command which does several runs, for example to take care of the bibliography. When compiling a single frame, though, we often just want a very quick glimpse of how it will look like. To reduce the time it needs to compile, we use a command which runs only once.
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-compile-frame.el
+  (defcustom org-latex-compile-frame-command (concat (format "%s -shell-escape -interaction nonstopmode -f" (replace-regexp-in-string "tex" "latex" (prin1-to-string TeX-engine))) " %f")
+    "Command to compile a single beamer frame with in org. `%f' is the file path."
+    :group 'tlt-utils)
+#+END_SRC
+* Extracting the beamer frame
+** Finding the Frame's Beginning
+First of all, we need to determine the =beamer= frame at hand. For this, we need a function to go to the next or last relevant heading. Since you can, by manipulating =org-beamer-frame-level=, determine at what level a beamer frame begins, we can't just jump to the next or last heading. It must be the next or last heading /of a specific level/. This is what =org-goto-heading-at-level= does. The definition of =goal= might seem quite complex, but it makes sense: =make-string= generates as many occurrences of =*= as needed, and =regexp-quote= escapes them (since =*= is a special regexp character).
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-compile-frame.el
+  (defun org-goto-heading-at-level (level &optional backward)
+    "Go to the next org-heading of level LEVEL. 
+    If BACKWARD is t, go to the last org-heading of level LEVEL."
+    (let ((goal (format "^%s [^$\n]+$" 
+                        (regexp-quote (make-string level ?*)))))
+      (if backward
+          (search-backward-regexp goal nil t)
+        (search-forward-regexp goal nil t))))
+#+END_SRC
+** finding the Frame's End
+Unfortunately, using =org-goto-heading-at-level= forward to find the frame's end would yield problems. Suppose you are at frame =** foo= and want to know where its heading is. Further suppose that the heading structure is like this:
+#+BEGIN_SRC org :results none
+* Sec 1
+** frame 1
+** foo
+* Sec 2
+** bar
+#+END_SRC
+What you would end up with running =(org-goto-heading-at-level 2)= would be right before =** bar=. That is, you would also take the section with you. But the section does not belong to the frame, so we need a way to handle this. The idea is simple: Search for the next heading of a level /at most as high/ as that of the frame at hand. This is what =org-heading-geq= does.
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-compile-frame.el
+  (defun org-heading-geq (level)
+    "Create a regexp that matches all org headlines of LEVEL or below."
+    (let ((nextlev 0)
+          (list nil))
+      (while (< nextlev (1+ level))
+        (push (make-string nextlev ?*) list)
+        (setq nextlev (1+ nextlev)))
+      (format "^%s [^$\n]+$" (regexp-opt list))))
+#+END_SRC
+In contrast to =org-goto-heading-at-level=, =org-heading-geq= will now match =* Sec 2=.
+** Finding the Frame
+With this, we have everything we need to find the frame. The procedure goes like this:
+1. Go back to the first frame heading and save its name and beginning coordinate.
+2. Go to the next level at most as high as the frame's level.
+3. Now go up one line, at the end of the line and report the position of point, which is the end position.
+4. Return a list of the frame name, its beginning coordinate and its end coordinate.
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-compile-frame.el
+  (defun org-find-frame ()
+    "Return a list containing the name of the frame as well as its beginning and end coordinates."
+    (let* ((level (1+ org-beamer-frame-level))
+           (beg (org-goto-heading-at-level level t))  ; beginning of frame
+           (name (substring-no-properties (org-get-heading))) ; get properties off
+                 (end 
+                  (progn
+                    (next-line)
+                    (beginning-of-line)
+                    (re-search-forward (org-heading-geq level))
+                    (previous-line)
+                    (end-of-line) ; end of frame
+                    (point))))
+           (list name beg end)))
+#+END_SRC
+** A Little Extra: copying frames
+Now that we have already found the frame, it is easy to copy or kill it. Below are the respective functions.
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-compile-frame.el
+  (defun tlt-copy-frame ()
+    (interactive)
+    "Copy frame at point into the kill-ring."
+    (let* ((info (org-find-frame))
+           (beg (nth 1 info))
+           (end (nth 2 info)))
+      (copy-region-as-kill beg end)))
+
+  (defun tlt-kill-frame ()
+    (interactive)
+    "Delete frame at point and store it in the kill-ring."
+    (let* ((info (org-find-frame))
+           (beg (nth 1 info))
+           (end (nth 2 info)))
+      (kill-region beg end)))
+#+END_SRC
+* Removing Anything but the Current Frame
+It might happen that you hardcoded (that is, wrote in plain =LaTeX=) the title and agenda frames. Since we only want one frame, we need to get rid of them. =spot-TeX-environment= returns the environment given as an argument, so =(spot-TeX-environment 'frame)= will find such a frame and return its coordinates. =delete-beamer-frames= will delete all frames in a document. Since this is both before exporting =org= to =TeX= and before adding the body, this does not pose a problem. 
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-compile-frame.el
+  (defun spot-TeX-environment (env)
+    "Find TeX-environment ENV closest to point. Return
+          beginning and end coordinates. If there is no such
+        environment, return nil."
+    (let ((beg-re (format "\\\\begin{%s}" env)))
+      (when (search-forward-regexp beg-re nil t)
+        (let* ((beg (progn
+                      (beginning-of-line) (point)))
+               (end-re (format "\\\\end{%s}" env))
+               (end (progn
+                      (search-forward-regexp end-re nil t))))
+          (list beg end)))))
+
+  (defun delete-beamer-frames ()
+    "Delete all LaTeX frame environments from point onwards."
+    (while (search-forward-regexp "\n\\\\begin{frame}" nil t)
+      (beginning-of-line)
+      (backward-char 1)
+      (let* ((bounds  (spot-TeX-environment 'frame))
+             (beg (nth 0 bounds))
+             (end (nth 1 bounds)))
+        (delete-region beg end))))
+#+END_SRC
+* Inserting Dummy Headings
+We only extracted the frame, so will not have any sectioning headings. Since they are needed for the frame to be compiled correctly, we need to add some. The idea is this: We just add as many dummy headings as needed, depending on =org-beamer-frame-level=: If our frames are at level 2, we need one section heading. If they are at level 14, we will need 13. =insert-beamer-frame-headings= calculates and inserts these dummy headings.
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-compile-frame.el
+  (defun insert-beamer-frame-headings (level)
+    "Insert a hierarchy of headings from the top-level-heading
+              to a heading with level LEVEL."
+    (let ((count 1))
+      (while (<= count level)
+        (insert (format "%s Heading Level %s"
+                        (make-string count ?*) count))
+        (newline)
+        (setq count (1+ count)))))
+#+END_SRC
+* Remove Unnecessary Files
+Before we get to the actual function, let us step aside and think for a moment: If we compile a frame, we will also get all the auxiliary files that come along with it, and since we are likely to compile not just one frame, we would very quickly end up with a completely messed up directory. To avoid that, we write a function which deletes the files to compile the frames: =tlt-remove-frame-files=. 
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-compile-frame.el
+  (defun tlt-frames-remove (name)
+    "Remove files necessary to compile frame."
+    (let* ((bare (file-name-base name))
+           (dir (file-name-directory name))
+           (dirfiles (directory-files dir))
+           (auxdir (if (boundp 'tlt-auxdir-name) 
+                       (concat dir tlt-auxdir-name) ""))
+           (auxdirfiles (directory-files auxdir))
+           (pdf-maybe (if (not tlt-remove-frame-pdf) (concat bare ".pdf") "")))
+
+      (let ((value))
+        (dolist (element auxdirfiles value)
+          (when (and (string-match 
+                      (regexp-quote bare) 
+                      (regexp-quote element))
+                     (not (member element 
+                                  `("." ".." ,pdf-maybe))))
+            (push element value)))
+
+        (when value
+          (let ((aux-delete
+                 (mapcar (lambda (x) (concat auxdir x)) value)))
+            (mapc #'delete-file aux-delete))))
+
+      (let ((value2))
+        (dolist (element dirfiles value2)
+          (when (and (string-match (regexp-quote bare) (regexp-quote element))
+                     (not (member element 
+                                  `(list "." ".." ,pdf-maybe))))
+            (push element value2))) 
+
+        (when value2
+          (let ((main-delete
+                 (mapcar (lambda (x) (concat dir x)) value2)))
+            (mapc #'delete-file main-delete))))))
+#+END_SRC
+* The Actual Function
+Finally, let's get to the actual function! he idea is the following: 
+1. Make a copy of the current buffer.
+2. Expand the =#+INCLUDE= keywords so that all data relevant for exporting is in the buffer at hand.
+3. Search for the first frame.
+4. Search backwards to the first frame's section.
+5. From that section onward, delete everything.
+6. Add the dummy headings.
+7. Insert the current frame extracted by =org-find-frame=.
+8. Write the resulting buffer into a file.
+9. Export that file to =beamer= and compile it using a quick command.
+10. Open the resulting PDF after compilation.
+11. Remove files as explained [[*Removing files][above]].
+
+Note that the first section does not need to be /the first frame's/ section. It is not uncommon to have a first level heading tagged with the =:ignore:= or =:noexport:= tag before the actual =LaTeX= code starts.
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-compile-frame.el 
+  (defun tlt-compile-beamer-frame ()
+    (interactive)
+    (let* ((beamer-level (1+ org-beamer-frame-level)) ; +1 because we dont count from 0
+           (level (make-string beamer-level ?*)) ; headline level for frames in stars
+           (frame-info (org-find-frame))
+
+           (dir (file-name-directory buffer-file-name))
+           (buf-name (file-name-nondirectory buffer-file-name)) ; buffer name 
+           (frame-name (substring-no-properties (car frame-info))) ; get away with org properties
+           (frame-file (format "[%s] %s" frame-name buf-name))
+           (filename (expand-file-name frame-file dir))
+           (frame (buffer-substring (nth 1 frame-info) (nth 2 frame-info))) ; single org frame  
+           (org-export-with-title nil) ; do not export title frame   
+           (org-latex-pdf-process (list org-latex-compile-frame-command)))
+
+      (with-current-buffer (org-export-copy-buffer) ; copy the current buffer to a temporary one
+        (org-export-expand-include-keyword) ; actually add the code from included files
+        (goto-char (point-min)) ; go to beginning of buffer
+        (org-goto-heading-at-level beamer-level) ; go to the first frame
+        (org-goto-heading-at-level org-beamer-frame-level t) ; go to the section the frame is located
+        (let ((beg (point))
+              (end (point-max)))
+          (delete-region beg end)
+          (newline)
+          (goto-char (point-min)) ; go to the file's beginning
+          (delete-beamer-frames) ; delete all manually added beamer frames (for title page/agenda)
+          (goto-char (point-max))
+          (insert-beamer-frame-headings org-beamer-frame-level) ; add place-holder headlines
+          (insert frame) ; insert the frame
+          (write-file frame-file) ; write the buffer to a file
+          (org-open-file (org-beamer-export-to-pdf))) ; and open the file after compilation
+        (when tlt-remove-frame-files (tlt-frames-remove filename))
+        )))
+
+  (provide 'tlt-compile-frame)
+
+  ;; tlt-compile-frame ends here ;;
+#+END_SRC
+

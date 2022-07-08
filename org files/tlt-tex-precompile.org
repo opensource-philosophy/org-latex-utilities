@@ -1,0 +1,351 @@
+* Create a Precompiling Command for =LaTeX=
+** A Note to Begin with
+If you do not have the feeling that your document compiles faster even though you precompiled its preamble, check whether you use =latexmk=:
+1. =org-mode= uses the command defined by  =org-latex-pdf-process=.
+2. =TeX-mode= by default takes the first member of =TeX-command-list=.
+If so, adjust the variables correspondingly; =latexmk= /does not support precompiled preambles/. 
+** Defining the Precompiling Command 
+First of all, we need to define the actual =LaTeX= command with which to precompile the preamble. This depends on the engine we use, so we will need to set that first. This is what =precompile-engine= is used for. By default, it is the same as that of =TeX-engine=. Since we need =precompile-engine= to be a string, we use =prin1-to-string= to get the string representation of =TeX-engine=. We also need the =-latex= form instead of the =-tex= form, e.g. =xelatex= instead of =xetex=. This is what =replace-regexp-in-string= is used for.
+
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-tex-precompile.el
+  (defcustom precompile-engine (replace-regexp-in-string "tex" "latex" (prin1-to-string TeX-engine))
+    "Engine to run precompiling command with.")
+#+END_SRC
+
+The actual =LaTeX= command is created by =TeX-command=. It takes two arguments: a string and a function. The string is the name that is given to the =LaTeX= command to be executed. The connection between the string and the command is defined in =TeX-command-list=. It is a list whose members are arranged this way:
+
+1. The name given to the =LaTeX= command.
+2. A skeleton of the actual =LaTeX= shell command.
+3. The function to run this command and its arguments
+4. The modes in whose command menu the command should be shown.
+5. A help string displayed when hovering over the command.
+
+An example of such a list member is
+#+BEGIN_SRC elisp :exports code
+  ("LaTeX" "%`%l -shell-escape %(mode)%' %t" TeX-run-TeX nil
+   (latex-mode doctex-mode)
+   :help "Run LaTeX")
+#+END_SRC
+The admittedly quite cryptic second member contains several wildcards to be expanded; the expansion is done by =TeX-command-expand= on the basis of =TeX-expand-list= for strings wrapped in =%(= and =%)= and =TeX-expand-list-builtin= for letters preceded by =%=.
+
+In order for our precompilation command to work, we need to create a similar list. This is what =precompile-list-item= is for. As it happens, the value of =-jobname= must be the same as the string at the beginning of the =.tex= file. I decided to hard-code this using the very common string "preamble".
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-tex-precompile.el
+  (defvar precompile-command (format "%s -ini -interaction nonstopmode -shell-escape -jobname=\"preamble\" \"&%s\\dump\"" 
+                                     precompile-engine (concat precompile-engine " %b"))
+    "Command to run for precompiling the preamble.")
+
+  (defvar precompile-list-item `("Precompiling" ,precompile-command TeX-run-precompile nil
+                                 (plain-tex-mode latex-mode doctex-mode org-mode)
+                                 :help "Precompile the preamble at hand for faster compiling.")
+    "List for precompilation.")
+
+#+END_SRC
+** Other Variables
+The preamble string is the name of the preamble file to be used for precompilation. By default, it is =preamble.tex=. 
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-tex-precompile.el
+  (defcustom tlt-show-precompilation nil
+    "Whether or not to show the output buffer of the precompilation."
+    :group 'tlt)
+
+  (defvar tlt-tex-precompile-process nil
+    "Stores the precompilation process. 
+    For internal use only.")
+
+  (defvar preamble-string "preamble.tex")
+
+  (defun preamble-string ()
+    "Returns `preamble-string'."
+    preamble-string)
+#+END_SRC
+* Searching for the Preamble
+Often times, it is more convenient to precompile the preamble from the =.tex= or =.org= file you actually work in. Thus, we need a way to find the preamble. This is what =find-preamble= does. The idea is this:
+1. Get the directory the current buffer's file is located in.
+2. From that directory, get all sub-directories.
+3. Search (non-recursively) for the preamble in the current directory and all of its sub-directories.
+   1. If a preamble file is found,
+      1. open it if =find-preamble= was called interactively using =M-x find-preamble= or a respective key-binding
+      2. return its path if not called interactively.
+   2. If a preamble file is not found
+      1. signal a message if called interactively
+      2. return an error if called non-interactively.
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-tex-precompile.el
+  (defun find-preamble (&optional open base)
+    "Assumes only one preamble to be in the directory or any of the subdirectories.
+  If called interactively, open the preamble."
+    (interactive "p")
+    (let* ((dir (file-name-directory (buffer-file-name)))
+           (dirfiles (directory-files dir))
+           (subdirs 
+            (-non-nil (mapcar 
+                       (lambda (x) 
+                         (when (and (file-directory-p x) 
+                                    (not (member  x '("." ".."))))
+                           x))
+                       dirfiles)))
+           (dirs (push dir subdirs))) ; dir appended so that if two preambles exist, the one in the current folder is selected
+
+      (let ((value))
+        (dolist (element dirs value)
+          (when (file-exists-p (expand-file-name preamble-string element))
+            (setq value element)))
+
+        (cond 
+       
+         ((and value open)
+          (find-file (expand-file-name preamble-string value))
+          (if (member preamble-string dirfiles)
+              (message "Preamble found in current directory.")
+            (message "Preamble found in subdirectory \"%s/\"." value)))
+
+         ((and (not value)  open)
+          (message "No preamble found in the subdirectories or file directory."))
+
+         ((and value (not open))
+          (if base preamble-string (expand-file-name preamble-string value)))
+
+         ((and (not value) (not open)) (error "No existing preamble found"))))
+      ))
+#+END_SRC
+* Creating the Process
+** Defining a Custom Sentinel
+First of all, we need to create a process to be called. This is done by =TeX-run-command=. After the process was called, it must be killed again, possibly extracting some information to return to the user before. This is what =tlt-tex-precompile-preamble-sentinel= does. Specifically, the sentinel function checks whether problems with =fontspec=, =unicode-math=, =fontawesome= or any other =XeLaTeX=-related font-package arose. The command which makes sure that the process is created by =TeX-run-command= and killed by =tlt-tex-precompile-preamble-sentinel= is =TeX-run-precompile=.
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-tex-precompile.el
+  (defun tlt-tex-precompile-preamble-sentinel (_process _name)
+    "Cleanup TeX output buffer after running Biber."
+    (goto-char (point-max))
+    (let           ((binding (substitute-command-keys                                     ;  store the command bindings
+                              "\\<tlt-TeX-utils-map>\\[tlt-tex-switch-to-precompilation-ouput]"))) ;  of the buffer switch command)
+      (cl-letf (((symbol-function 'substitute-command-keys) (lambda (string &optional noface) binding)))
+
+        (cond
+
+         ((re-search-backward "exited abnormally\\|^Emergency stop\\|! I can't find file" nil t)
+          (message (concat "TeX exited abnormally!"
+                           "Type `%s' to display output.")
+                   (substitute-command-keys
+                    "\\<TeX-mode-map>\\[TeX-recenter-output-buffer]")))
+
+         ((re-search-backward "! Can't \dump a format with native fonts or font-mappings." nil t)
+          (message "Errors while recompiling! XeLaTeX can't handle native fonts. Remove fontspec and packages that depend on it from the preamble and recompile."))
+
+         ((re-search-backward "^INFO - \\(WARNINGS\\|ERRORS\\): \\([0-9]+\\)" nil t)
+          (message (concat "Precompilation finished with %s %s. "
+                           "Type `%s' to display output.")
+                   (match-string 2) (downcase (match-string 1))
+                   (substitute-command-keys
+                    "\\<TeX-mode-map>\\[TeX-recenter-output-buffer]"))
+          (setq TeX-command-next TeX-command-default))
+
+         ((re-search-backward "^FATAL" nil t)
+          (message (concat "There was a fatal error during precompiling!"
+                           "Type `%s' to display output.")
+                   (substitute-command-keys
+                    "\\<TeX-mode-map>\\[TeX-recenter-output-buffer]"))
+          (setq TeX-command-next "Precompiling"))
+
+         (t
+          (message "Precompiling finished successfully! You can run TeX as usual now.")
+          (setq TeX-command-next TeX-command-default))))))
+
+  (defun TeX-run-precompile (name command file)
+    "Create a process for NAME using COMMAND to precompile FILE.
+          Return that process."
+    (let ((process (TeX-run-command name command file)))
+      (setq TeX-sentinel-function #'tlt-tex-precompile-preamble-sentinel)
+      (if TeX-process-asynchronous
+          process
+        (TeX-synchronous-sentinel name file process))))
+#+END_SRC
+** Handling Relative Paths in the Preamble
+A big problem I was facing were relative paths used in the preamble command. Suppose you have the following line in there:
+#+BEGIN_SRC latex :exports code
+  \input{Configuration/macros.tex}
+#+END_SRC
+In addition, suppose that your preamble file is in the subdirectory =auxiliary files=. If you now run =tlt-tex-precompile-preamble=, the process's =default-directory= will be the main folder. Now you can, from there, issue the precompilation command -- the preamble will be found --, but the relative path will now pose a problem, since your shell will look for =Configuration/macros= /in your main folder/ and not in =auxiliary files=! You'll get the error that =Configuration/macros.tex= couldn't be found. 
+
+To account for relative paths in the preamble, we need to have the default-directory set to the directory the preamble resides in. This is handled by =TeX-run-command=, which generates the process. The relevant line here is -- who would have thought --
+#+BEGIN_SRC elisp :exports code
+  (if dir (cd dir))
+#+END_SRC
+where =dir= is the /current/ buffer's directory. So we need to change the value of =dir=. =dir= itself is a variable locally bound by a =let= command:
+#+BEGIN_SRC elisp :exports code
+  (dir (TeX-master-directory))
+#+END_SRC
+Since =dir= is the value of =TeX-master-directory=, we will only need to change its function definition within =TeX-run-command= in such a way that it returns the right path -- the directory in which the preamble resides, or, in more technical terms, the value of =(file-name-directory (find-preamble))=.
+
+Now =TeX-run-command= is also called in contexts in which we do not want to precompile a preamble, so blindly writing a function advice for =TeX-master-directory= would yield problems; we need to make sure that =TeX-master-directory= is changed only if we are precompiling a preamble. And for that we need a condition, which can be found further down the code: In order to correctly determine the =TeX= command to be run, we need to alter the parameter =%b= in =TeX-expand-list-builtin=. We do so by adding another entry to the list using =add-to-list=. Thus, this list entry is the first item (that is, the =car=) of =TeX-expand-list-builtin= if and only if we are running =tlt-tex-precompile-preamble= or, in other words, if and only if we are precompiling a preamble! Thus, our advise-funciton =directory-wrapper= looks like this:
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-tex-precompile.el
+  (defun directory-wrapper (fun name command file)
+    "Wrapper for `TeX-command-run' to change the process buffer's default directory."
+    ;; If we are in the middle of a precompiling command, ;;
+
+    (if (equal (car TeX-expand-list-builtin) '("%b" find-preamble nil t))
+
+        ;; let `TeX-master-directory' return the preamble's path
+
+        (flet ((TeX-master-directory () (file-name-directory (find-preamble))))
+          (funcall fun name command file))
+
+      ;; else just call `TeX-master-directory' unaltered
+
+      (funcall fun name command file)))
+#+END_SRC
+* Precompiling the Preamble
+** The Actual Command
+The final interactive command to precompile the preamble is pretty straightforward now. Only a few notes are in order:
+1. The modification of =TeX-expand-list-builtin= is the one we just used as a condition to create a suitable advice for =TeX-run-command=. It makes sure that the correct keys are shown for issuing =tlt-tex-switch-to-precompilation-output=.
+2. =TeX-show-compilation= is replaced by =tlt-show-precompilation= for the users to decide themselves whether the output buffer of the precompilation command should be shown immediately.
+3. =preamble-string= is given as the command to specify the path the the preamble. It always returns the value of the variable (!) =preamble-string=. This might sound wrong in the first place, but remember that we do not need a path since we =cd= in the preamble's folder with =TeX-run-command=.
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-tex-precompile.el
+  (defun tlt-tex-precompile-preamble () 
+    "Run biber on the `.tex' file corresponding to the current buffer's `.org' file and return process.
+  If there is no such file, create it. If there is no `.bcf' file, ask for a LaTeX run first;
+  see `tex-file-get-create'."
+    (interactive)
+    (let ((preamble (find-preamble)))
+
+      (cond (preamble ; found
+
+             (let* ((TeX-expand-list-builtin ; replace file name function in biber call
+                     (add-to-list 'TeX-expand-list-builtin '("%b" find-preamble nil t))) ; prepending to list works; old entry further down is ignored
+                    (TeX-show-compilation tlt-show-precompilation) ; own variable whether to show output directly
+                    (TeX-command-sequence-max-runs-same-command 1) ; only run once
+                    (pre-dir (file-name-directory preamble))
+                                          ;  (default-directory pre-dir) ; change to directory the preamble is located in
+                    (binding (substitute-command-keys                                     ;  store the command bindings
+                              "\\<tlt-TeX-utils-map>\\[tlt-tex-switch-to-precompilation-output]"))) ;  of the buffer switch command
+               (cl-letf (((symbol-function 'substitute-command-keys) (lambda (string &optional noface) binding))) ; and return it when `substitute-command-keys' is called
+
+                 (setq tlt-tex-precompile-process (TeX-command "Precompiling" #'preamble-string))))) ; store the process returned to make it accessible later on
+
+            ((called-interactively-p) (message "No preamble to compile was found.")) ; not found, interactive
+            (t nil)))) ; not found, not interactive
+#+END_SRC
+** Consulting the Output Buffer
+Now if the sentinel informed us that the precompilation did not finish as expected, we might want to inspect the exact error messages by having a look at the output command buffer. This is the task of =tlt-tex-switch-to-precompilation-output=.
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-tex-precompile.el
+  (defun tlt-tex-switch-to-precompilation-output ()
+    (interactive)
+    "Display the buffer containing the output from the precompilation.
+        Inform where the precompilation happened."
+    (let* ((buf (process-buffer tlt-tex-precompile-process))
+           (bufname (buffer-name buf))
+           (strlist (split-string bufname "/" t nil))
+           (names (last strlist 2))
+           (filename (nth 1 names))
+           (filename-finish (string-trim filename nil " output\\*"))
+           (dirname (concat (nth 0 names) "/")))
+      (prog1
+          (message (format "Output from precompilation on %s in %s" filename-finish dirname))
+        (display-buffer buf))))
+#+END_SRC
+** Tool-bar Button
+To have our precompilation command available from the tool-bar, we will need to add the necessary information to =TeX-bar-TeX-button-alist= and =TeX-bar-LaTeX-button-alist=. This is what =precompile-button= is for. =tlt-precompile-button-tb= is a boolean variable to determine whether the precompilation command should be shown in the tool-bar.
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-tex-precompile.el
+  (defvar precompile-button                      '(precompile :image "gv"
+                                                              :command (tlt-tex-precompile-preamble)
+                                                              :help (lambda (&rest ignored)
+                                                                      (TeX-bar-help-from-command-list "Precompile your preamble"))))
+
+  (defcustom tlt-precompile-button-tb t
+    "Whether to add a precompilation button in the TeX-mode tool-bar.")
+#+END_SRC
+*  Make =org-mode= Support Precompiling
+At this point, we have commands to find the preamble in question, precompile it, show errors after compilation and switch to the output buffer. In other words: Everything needed for /precompiling/ is arranged. Nonetheless, we have not yet dealt with actually /compiling/ a file using the precompiled preamble. 
+
+For =LaTeX= to use the precompiled preamble, the =.tex= file needs to start with an expression of the form =%&preamble=. If we export from =.org= to =.tex=, though, the first lines are of this form:
+#+BEGIN_SRC latex :exports code
+  % Created [date] [weekday] [time in HH:MM]
+  % Intended LaTeX compiler: [compiler]
+#+END_SRC
+Thus, we need to advice =org= to add =%&preamble= to any file which (1) is exported to =.tex= and (2) has a preamble floating around somewhere. =org-latex-template= returns the relevant template string, so we only need to advise this. Same spiel for =org-beamer-template=. This is what =tlt-preamble-template= does. The procedure is the following:
+
+1. Check whether there is =preamble.fmt= in the main directory or any subdirectory.
+   1. If there is, but its not =preamble.org=,
+      1. move that preamble file to the =.org= document's directory
+      2. export the current =.org= document without =\documentclass= but with =%&preamble=.
+   2. If there is not, keep the =.org= file as-is; do nothing at all.
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-tex-precompile.el
+  (defun tlt-preamble-template (fun contents info)
+    (let* ((preamble-string "preamble.fmt") ; to not search for preamble.tex
+           (preamble (condition-case nil ; condition-case handles error message
+                         (find-preamble) ; find preamble.fmt
+                       (error nil)))     ; return nil on error
+(file (buffer-name))
+           (dir (file-name-directory (buffer-file-name))))
+      (if (and preamble (not (equal file "preamble.org"))) ; preamble shouldn't have features below
+          ;; if there is preamble.fmt
+          (progn
+                                          ; move it in the main folder
+            (rename-file preamble dir t)
+            ;; add "%&preamble\n" and delete the documentclass definitoin
+            (let ((template (funcall fun contents info)))
+              (concat "%&preamble\n" 
+                      (replace-regexp-in-string 
+                       "\\\\documentclass\\[[^]]+]{[a-z 0-9]+}\n" "" template)))) ; delete \documentclass
+        ;; else just call the function as-is
+        (funcall fun contents info))))
+#+END_SRC
+* Adding a Tool-bar Entry
+Once the precompiling command is added to =TeX-command-list=, a /menu bar/ entry is automatically created by =TeX-command-menu-entry=, which is run in =TeX-mode-specific-command-menu=. So there is no need to take care of this manually. Nonetheless, a /tool bar/ entry for precompiling is not added automatically. How this is done is already explained in [[*Tool-bar button][Tool-bar button]] already. To make sure the tool-bar is updated, =LaTeX-install-toolbar= and =TeX-install-toolbar= are added.
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-tex-precompile.el
+  (defun tlt-tool-bar-toggle-precompile-button ()
+    "Add/remove precompilation button to/from the tool-bar in TeX mode."
+    (let ((button (assoc 'precompile TeX-bar-TeX-button-alist)))
+                                          ; if the precompiling command is in the tool-bar, remove it
+      (if button
+          (progn  
+
+            (setq TeX-bar-TeX-button-alist (delete precompile-button TeX-bar-TeX-button-alist))
+            (setq TeX-bar-TeX-buttons (delete 'precompile TeX-bar-TeX-buttons))
+            (setq TeX-bar-LaTeX-buttons (delete 'precompile TeX-bar-LaTeX-buttons))
+            (LaTeX-install-toolbar)
+            (TeX-install-toolbar))
+
+                                          ; if it is not, add it
+        (when tlt-precompile-button-tb
+          (add-to-list 'TeX-bar-TeX-button-alist precompile-button t)) ; t for appending
+        (add-to-list 'TeX-bar-TeX-buttons 'precompile t)
+        (add-to-list 'TeX-bar-LaTeX-buttons 'precompile t)
+        (LaTeX-install-toolbar)
+        (TeX-install-toolbar)))
+
+    nil)
+#+END_SRC
+** Reaping our Labor's Fruits
+The commands below install and remove the functionality we just wrote the code for. With that, our package is finished!
+#+BEGIN_SRC elisp :exports code :tangle el-files/tlt-tex-precompile.el
+  (defun tlt-tex-install-precompiling ()
+    (advice-add 'TeX-run-command :around #'directory-wrapper)
+    (advice-add 'org-beamer-template :around #'tlt-preamble-template)
+    (advice-add 'org-latex-template  :around #'tlt-preamble-template)
+    (add-hook 'tool-bar-mode-hook #'tlt-tool-bar-toggle-precompile-button)
+    (add-to-list 'TeX-command-list precompile-list-item t))
+
+  (defun tlt-tex-uninstall-precompiling ()
+    (advice-remove 'TeX-run-command #'directory-wrapper)
+    (advice-remove 'org-beamer-template #'tlt-preamble-template)
+    (advice-remove 'org-latex-template  #'tlt-preamble-template)
+    (remove-hook 'tool-bar-mode-hook #'tlt-tool-bar-toggle-precompile-button)
+    (setq TeX-command-list (delete precompile-list-item TeX-command-list)))
+
+  (provide 'tlt-tex-precompile)
+
+  ;; tlt-tex-precompile.el ends here ;;
+#+END_SRC
+* COMMENT rest
+** Commands for precompiled preambles
+Latexmk won't use precompiled preambles. For this reason, we're using a different command.
+#+BEGIN_SRC elisp :exports code
+  (defcustom xelatex-fast '("xelatex fast" "xelatex -file-line-error --synctex=1 -shell-escape  -interaction=nonstopmode %b" TeX-run-interactive nil
+                            (plain-tex-mode latex-mode doctex-mode org-mode)
+                            :help "Run a quick xelatex command.")
+
+    (add-to-list 'TeX-command-list xelatex-fast t)
+    "Fast xelatex command.")
+
+                                          ; Wenn .bcf existiert, biber + xelatex fast
+                                          ; sonst xelatex fast + biber + xelatex fast
+  (TeX-command-sequence '("Biber" "xelatex fast"))
+#+END_SRC
+
