@@ -2,20 +2,20 @@
 First of all, some variables. In order for the package to work, we will need to identify the respective columns. Depending on the language you choose, though, they may be labelled differently. Although it would, in principle, be possible to identify all of them by means of the content of their cells, it is more straight forward to provide variables.
 
 #+BEGIN_SRC elisp :exports code :results nil :tangle natural-deduction.el
-  (defcustom tlt-nd-stars "Sterne"
-    "Name of the column to be numbered.")
+  (defcustom tlt-nd-stars '(1 "Sterne")
+    "Number and name of the star column.")
 
-  (defcustom tlt-nd-rowname "Zeile"
-    "Name of the column to be numbered.")
+  (defcustom tlt-nd-rowname '(2 "Zeile")
+    "Number and name of the column to be numbered.")
 
-  (defcustom tlt-nd-reference "Bezug"
-    "Name of the column containing numbered tlt-nd-references.")
+  (defcustom tlt-nd-formulas '(3 "Formel")
+    "Number and name of the formula column.")
 
-  (defcustom tlt-nd-rule "Regel"
-    "Name of the column to be numbered.")
+  (defcustom tlt-nd-reference '(4 "Bezug")
+    "Number and name of the reference column.")
 
-  (defcustom tlt-nd-formulas "Formel"
-    "Name of the column containing the actual tlt-nd-formulas.")
+  (defcustom tlt-nd-rule '(5 "Regel")
+    "Number and name of the rule column.")
 
   (defcustom tlt-nd-hyp "Hyp"
     "Name of the assertion tlt-nd-rule.")
@@ -23,124 +23,246 @@ First of all, some variables. In order for the package to work, we will need to 
   (defcustom tlt-nd-capitalize t
     "Whether to capitalize rules automatically when aligning the table.")
 
-  (defvar tlt-nd-colnames nil
-    "Column names of table last analyzed.")
+  (defcustom tlt-nd-no-ref-rules '(tlt-nd-none tlt-nd-new)
+    "Functions of rules which do not reference any line.")
 #+END_SRC
 
-* Adjusting the reference numbers
-** Getting the Column Names
-First of all, we will need to identify which column does what. To do so, we need a function which returns a list of column names so we can compare them with the variables above. This is what =get-colnames= does: For every column, it returns a list of the form =COLNUM . NAME=. For the reference column, for example, it would return =4 . "reference"= if the reference column was the fourth one and named "reference".
-#+BEGIN_SRC elisp :exports code :results nil :tangle natural-deduction.el
-  (defun get-colnames ()
-    "Return an alist whose members are of the form (COLNUMNAME . STRING).
-                STRING is the content of a cell, whitespaces trimmed off."
-    (org-table-analyze)
-    (let ((beg (org-table-begin))
-          (end (org-table-end))
-          (counter 1)
-          (colnums org-table-current-ncol)
-          (org-table-allow-automatic-line-recalculation nil) ; because it is done with the ctrl-c-ctrl-c-hook later anyway
-          (org-table-automatic-realign nil))
-      (setq tlt-nd-colnames nil)
-      (save-excursion
-        (goto-char beg)
-        (while (<= counter colnums)
-          (org-table-next-field)
-          (push (cons counter
-                      (string-trim               ; remove trailing/leading whitespace and
-                       (substring-no-properties  ; remove org-properties
-                        (org-table-get-field)))) ; of the current cell's content
-                tlt-nd-colnames)
-          (setq counter (1+ counter))))
-      (reverse tlt-nd-colnames)))
+#+RESULTS:
+: tlt-nd-no-ref-rules
 
-  (defun get-nth-char-in-string (n string)
-    "Return Nth char in STRING."
-    (substring string (1- n) n))
+** Proof rules
+#+BEGIN_SRC elisp :exports code :results none
+  (defcustom tlt-nd-rule-hyp '(:rule hyp
+                                  :names ("Hyp" "$Hyp$" "Hypothesis")
+                                  :refs 0
+                                  :star-function tlt-nd-new
+                                  :args (list row starcol hypno hyps-total))
+    "Rule for introducing a hypothesis.")
 
+  (defcustom tlt-nd-rule-intro-and '(:rule intro-and
+                                        :names ("$I\\land$" "I&")
+                                        :refs 2
+                                        :star-function tlt-nd-unite
+                                        :args (list starcol row hyplist))
+    "Rule for introducing a conjunction.")
 
-  (defun org-table-get-notrim (row column)
-    "Works just like `org-table-get' but does not trim off whitespace.
-                      Needed for whitespaces to later be converted to '-'."
-    (setq column (or column (org-table-current-column)))
-    (save-excursion
-      (and (or (not row) (org-table-goto-line row))
-           (org-table-get-field column))))
+  (defcustom tlt-nd-rule-intro-or '(:rule intro-or
+                                       :names ("$I\\lor$" "Iv")
+                                       :refs 1
+                                       :star-function tlt-nd-adopt
+                                       :args (list row starcol refnums))
+    "Rule for introducing a disjunction.")
 
-  (defun capitalize-first-char (string)
+  (defcustom tlt-nd-rule-elim-if '(:rule elim-if
+                                      :names ("$E\\to$" "E->")
+                                      :refs 2
+                                      :star-function tlt-nd-unite
+                                      :args (list starcol row hyplist))
+    "Rule for eliminating a conditional.")
+
+  (defcustom tlt-nd-rule-special-proven '(:rule special-proven
+                                             :names ("AL" "PC" "" "PL" "S1" "S2" "S3" "S4" "S5")
+                                             :refs 2
+                                             :star-function tlt-nd-none
+                                             :args (list row starcol hypcount))
+    "Rule for introducing a formula already proved.")
+
+  (defcustom tlt-nd-rule-special-elim-multi-if '(:rule special-elim-multi-if
+                                                    :names ("$I\\to_+$" "$I\\to_{+}$" "I->+")
+                                                    :refs n
+                                                    :star-function tlt-nd-intersect
+                                                    :args (list starcol row hyplist))
+    "Rule for eliminating several hypotheses at once.")
+
+  (defcustom tlt-nd-proof-rules '(tlt-nd-rule-hyp tlt-nd-rule-intro-and tlt-nd-rule-intro-or 
+                                               tlt-nd-rule-elim-if tlt-nd-rule-special-proven 
+                                               tlt-nd-rule-special-elim-multi-if)
+    "List of rules to be considered for natural deduction proofs.")
+#+END_SRC
+** Anderes
+#+BEGIN_SRC elisp :exports code
+  (defvar tlt-nd-table nil
+    "The table last fetched by `tlt-nd-get-table'.")
+#+END_SRC
+
+#+RESULTS:
+: tlt-nd-table
+
+* Storing the Table
+For any operation to come, we need the table stored in an object. The procedure to get a function which returns such an object is straight-forward:
+1. Define a function to go to the next table cell until a specific point.
+2. Define a function to fetch all cells of a row to get a single row.
+3. Define a function to fetch all rows to get get the whole table.
+#+BEGIN_SRC elisp :exports code
+  (defun tlt-nd-capitalize-first-char (string)
     "Return STRING, first char capitalized.
-    Return zero-length strings as-is."
+        Return zero-length strings as-is."
     (if (equal string "") ""
       (concat (upcase (substring string 0 1)) (substring string 1))))
 
-  (defun get-column (column lines &optional trim)
-    "From the table at hand, return an alist whose elements are of the form
-                      (ROWNUMBER . FIELD) for column no. COLUMN until LINES. If TRIM is 'left,
-                    'right or 'both, trim respectively. If TRIM is 'stars,
-                remove the first whitespace left and replace the remaining whitespaces by '-'.
-          Else do not trim at all. If `tlt-nd-capitalize' is t, also upcase the first letter
-          of each field."
-    (let ((row 2) ; row counter starts at 2
-          (lineno (+ lines 2)) ; actual lines start here
-          (fields))     ; empty list
-      (while (< row lineno)
-        (let* ((field-bare (substring-no-properties (org-table-get-notrim row column)))
-               (rownumber (1- row))
-               (field-processed
+  (defun tlt-nd-next-field-until (end)
+    "Go to the next field. Return nil if at END.
+    Great parts copied from `org-table-next-field'."
+    (let ((org-table-tab-jumps-over-hlines t))
+      (condition-case nil
+          (progn
+            (re-search-forward "|" end)
+            (if (looking-at "[ \t]*$")
+                (re-search-forward "|" end))
+            (if (looking-at "-")
+                (re-search-forward "^[ \t]*|\\([^-]\\)" end t)
+              (goto-char (match-beginning 1))))
+        (error (if (equal end (point))
+                   nil t)))))
 
-                ;; value of field depending on trim argument ;;
+  (defun tlt-nd-next-field ()
+    "Go to the next field. Return nil if at the end of the table."
+    (tlt-nd-next-field-until (1- (org-table-end))))
 
-                (cond  ((equal (string-trim field-bare) "") (string-trim field-bare)) ; contract all whitespace-only strings to zero-length strings
-                       ((equal trim 'stars)
-                        (s-replace-regexp " " "-"
-                                          (string-remove-prefix " "
-                                                                (string-trim-right field-bare)))) ; make "   +" "--+"
-                       ((equal trim 'both) (string-trim field-bare))
-                       ((equal trim 'left) (string-trim-left field-bare))
-                       ((equal trim 'right) (string-trim-right field-bare))
-                       (t field-bare)))
+  (defun tlt-nd-get-row ()
+    "Return a list of the contents of every cell in the row at hand.
+    The strings are trimmed, capitalized and without properties."
+    (let ((rowend (re-search-forward "|\s*$" nil t))
+          (org-table-tab-jumps-over-hlines t)
+          (search t)
+          (row nil))
+      ;; If not at the beginning of line, go there ;;
+      (unless (bolp) 
+        (beginning-of-line))
+      ;; move point right of the first occurrence of "|" ;;
+      (re-search-forward "|")
+      ;; get the field at hand and push it to `row' until row ends ;;
+      (while search
+        (looking-at "[^|\r\n]*")
 
-               (field (if tlt-nd-capitalize
-                          (capitalize-first-char field-processed)
-                        (field-processed)))
+        (let* ((field-trim 
+                       (org-trim                         ; trimm
+                        (buffer-substring-no-properties  ; remove properties
+                         (match-beginning 0)
+                         (match-end 0))))
+              (field
+          ;; Capitalize depending on custom variable ;;
+          (if tlt-nd-capitalize 
+                (tlt-nd-capitalize-first-char field-trim)
+                 field-trim))
+            ; (field (concat " " field-maybe-cap))
 
-               (element (list rownumber field)))
-          (push element fields))
-        (setq row (1+ row)))
+)
 
-      (reverse fields))) ; because the first field is pushed first and thus the last element
+            (push field row))
 
-  (defun abstract-column (col1 col2 string)
-    "Return the subset of COL1 consisting of (ROWNUM FIELDCOL1) such that
-          FIELDCOL2 in (ROWNUM FIELDCOL2) matches STRING. Return an error message
-        if FIELDCOL1 does not contain exactly one occurrence of '+'."
-    (let ((counter 1)
-          (max (length col1)))
-      (let ((list))
-        (while (<= counter max)
-          (let* ((starlist (nth (1- counter) col1))       ; for example (2 "-+")
-                 (starstring (nth 1 starlist))                  ; for example "Iv"
-                 (starnumber (nth 0 starlist))
-                 (rulelist (nth (1- counter) col2))            ; for example (1 "Iv")
-                 (rulestring (nth 1 rulelist)))                       ; for example "Iv"
+        (setq search (tlt-nd-next-field-until rowend)))
+      ;; return row ;;
+      (reverse row)))
 
-            (when (equal rulestring string)
-              (let ((how-many-stars (cl-count ?+ starstring))) ; how many occurrences of "+"
-                (if (= how-many-stars 1)
-                    (push starlist list)
-                  (error "The hypothesis in row %s has %s star%s in it. Fix before re-aligning, please"
-                         starnumber
-                         (if (equal how-many-stars 0) "no" how-many-stars)
-                         (if (equal how-many-stars 0) "" "s"))))))
-          (setq counter (1+ counter)))
-        (reverse list))))
+  (defun tlt-nd-get-table ()
+    "Store the table at hand."
+    (let ((end (org-table-end))
+          (search t)
+          (table nil))
+      (save-excursion
+        (goto-char (org-table-begin))
+        ;; Loop
+        (while search
+          (push 
+           (tlt-nd-get-row)
+           table)
+          (setq search (tlt-nd-next-field)))
+        ;; return table
+        (setq tlt-nd-table (reverse table)))))
 #+END_SRC
 
-** Replacing Strings in a List
-In order to automatically correct the line numbers, we need a way to replace the old ones by the new ones. The line numbers are string, for example "2" or "5", and =adjust-numbers= stores them in a list. To change the wrong numbers now, we need to replace the corresponding wrong strings with respective right strings. And this is what =replace-string-in-list= does.
+#+RESULTS:
+: tlt-nd-get-table
+
+* Accessing Rows, Columns, Fields
+We will need to access rows, columns and fields to update the table. Below are the functions which allow this.
+#+BEGIN_SRC elisp :exports code
+  (defun tlt-nd-line (line)
+    "Get list for line number LINE stored in `tlt-nd-table'. 
+  Set the variable if it is nil."
+    (if tlt-nd-table
+        (nth (1- line) tlt-nd-table)
+      (nth (1- line) (tlt-nd-get-table))))
+
+  (defun tlt-nd-column (colnum)
+    "Get column number COLNUM."
+    (unless tlt-nd-table (tlt-nd-get-table))
+    (let ((counter 1)
+          (length (length tlt-nd-table))
+          (col nil))
+      (while (<= counter length)
+        (push
+         (nth (1- colnum) 
+              (tlt-nd-line counter))
+         col)
+        (setq counter (1+ counter)))
+      (reverse col)))
+
+  (defun tlt-nd-column-headless (colnum)
+    "Get column number COLNUM without headlines."
+    (cdr (tlt-nd-column colnum)))
+
+  (defun tlt-nd-row (row)
+    "Get row number ROW. Disregard header."
+    (if tlt-nd-table
+        (nth row tlt-nd-table) ; not -1 to disregard header
+      (nth row (tlt-nd-get-table))))
+
+  (defun tlt-nd-field (colnum row)
+    "Get field in column COLNUM and row ROW."
+    (nth (1- colnum) (tlt-nd-row row)))
+#+END_SRC
+
+#+RESULTS:
+: tlt-nd-field
+* Changing the Table
+** Generic functions
+#+BEGIN_SRC elisp :exports code
+  (defun tlt-nd-set-field (colnum row value)
+    "Set field in column COLNUM and row ROW of `tlt-nd-table' to VALUE."
+    (setf  (nth (1- colnum) (tlt-nd-row row)) value))
+
+  (defun tlt-nd-nth-char (n string)
+    "Return Nth char in STRING. Nth is zero-based."
+    (substring string (1- n) n))
+
+  (defun delete-star (wrong-star str)
+    "Replace '+' at position WRONG-STAR in STR by '-'."
+    ;; replace the wrong-star by a "-"
+    (replace-regexp-in-string  ; replace any "+" at level star-level-act
+     (format "\\(^ [\\+\\-]\\{%d\\}\\)\\(\\+\\)\\([\\+\\|\\-]*\\)" (1- wrong-star)) ; 1- because we exclude them so the first char is the star level
+
+     ;;  first group: all occurrences of "+" or "-" until, excluding, `right-star' - anything before
+     ;;  second group: exactly one occurrence of "+" or "-": the one to replace  ;;
+     ;;  third group: zero or more occurrences of "+" or "-"  - anything after              ;;
+     "\\1-\\3" ; the wrong star is replaced by a "-"
+     ;;  first group, second group replaced by ";%d;", third group          ;;
+     str))
+
+  (defun add-star (right-star str)
+    "Replace '+' at position WRONG-STAR in STR by '-' and, if RIGHTPLUS it non-nil,
+    replace '-' at position RIGHT-STAR in STR by '+'."
+    (replace-regexp-in-string  ; replace any "+" at level star-level-act by ";star-amount;" if it exists
+     (format "\\(^ [\\+\\-]\\{%d\\}\\)\\([\\+\\|\\-]\\)\\([\\+\\|\\-]*\\)" (1- right-star)) ; 1- because we exclude them so the first char is the star level
+
+     ;;  first group: all occurrences of "+" or "-" until, excluding, `right-star' - anything before
+     ;;  second group: exactly one occurrence of "+" or "-": the one to replace  ;;
+     ;;  third group: zero or more occurrences of "+" or "-"  - anything after              ;;
+     "\\1+\\3" ; the wrong star is replaced by a "-"
+     ;;  first group, second group replaced by ";%d;", third group          ;;
+     str))
+#+END_SRC
+
+#+RESULTS:
+: add-star
+
+** Correct Rows and Reference Numbers
+*** Preliminary Functions
+In order to automatically correct the line numbers, we need a way to replace the old ones by the new ones. The line numbers are strings, for example "2" or "5", and =adjust-numbers= stores them in a list. To change the wrong numbers now, we need to replace the corresponding wrong strings with respective right strings. And this is what =replace-string-in-list= does.
 
 Similarly, we will also need to order the row numbers, so we will need to order a list of number strings. This is the job of =order-list-string-int=.
-#+BEGIN_SRC elisp :exports code :results nil :tangle natural-deduction.el
+#+BEGIN_SRC elisp :exports code
   (defun replace-string-in-list (old new list)
     "Return the result of replacing OLD by NEW in LIST."
     (let ((outlist))
@@ -167,40 +289,36 @@ Similarly, we will also need to order the row numbers, so we will need to order 
         sorted-string)))
 #+END_SRC
 
-** The Actual Function
+#+RESULTS:
+: order-string
+
+*** The Actual Function
 Let's say that for some reason, row no. 4 was labelled with "3". So far, the function replaces every occurrence of "3" in the reference column by "4". Now imagine that row no. 5 was accidentally labelled "4". Now, every occurrence of "4" will be labelled "5" -- also those which were just converted into "4". To avoid that, we temporarily change the numbers' names: "3" becomes "4mark" instead of "4" so that it will not get replaced.
 #+BEGIN_SRC elisp :exports code :results nil :tangle natural-deduction.el
   (defun adjust-numbers ()
     "Adjust numbers."
-    (let* ((cols (get-colnames))                                               ; (... (2. "Zeile") ... (4. "Bezug"))
-           (ref (car (rassoc tlt-nd-reference cols)))                             ; 2 aus (2 . "Zeile")
-           (row (car (rassoc tlt-nd-rowname cols)))                               ; 4 aus (4 . "Bezug")
-           (lines (length org-table-dlines))                               ; Anzahl Zeilen (+1)
-           (org-table-allow-automatic-line-recalculation nil) ; because it is done with the ctrl-c-ctrl-c-hook later anyway
+    (let* ((ref (car tlt-nd-reference))                                    ; 2 aus (2 "Zeile")
+           (row (car tlt-nd-rowname))                                      ; 4 aus (4 "Bezug")
+           (lines (length tlt-nd-table))                               ; number of lines +1
+           (org-table-allow-automatic-line-recalculation nil)              ; done with `ctrl-c-ctrl-c-hook' later anyway
            (org-table-automatic-realign nil)
-           (counter 2))                                                    ; first counter to loop over row name; starts with two because of the headline
+           (refs (tlt-nd-column-headless ref))
+           (rownum 1))                                                     ; to loop over row name;
 
       ;; Looping over the ROW numbers ;;
 
-      (while (< counter lines)
-        (let* ((rownum (1- counter))                                       ; -1 becaues of the headline
-               (rownum-str (int-to-string rownum))                         ; 1 → "1"
-               (actnum (string-trim
-                        (substring-no-properties
-                         (org-table-get counter row))))                    ; the actual (possibly wrong) row number (trimmed off whitespaces)
-               (counter2 2))                                               ; second counter to loop over tlt-nd-references list
+      (while (< rownum lines)
+        (let* ((rownum-str (int-to-string rownum))                         ; 1 → "1"
+               (actnum (tlt-nd-field row rownum))
+               (counter2 1))                                               ; second counter to loop over tlt-nd-references list
 
+          (unless (equal (int-to-string rownum) actnum)                    ; if the row number is wrong (convert counter bc actnum is a string)
+            (tlt-nd-set-field row rownum rownum-str)                       ; set it to the right one
 
-
-          (unless (equal (int-to-string rownum) actnum)                    ; if the row number is a wrong one (convert counter bc actnum is a string)
-            (org-table-put counter row rownum-str)                         ; set it to the right one (-1 because of headline)
-
-            ;; Looping over the TLT-ND-REFERENCE numbers ;;                       ; change all the wrong numbers to the right ones in the tlt-nd-reference column
+            ;; Looping over the TLT-ND-REFERENCE numbers ;;                ; change all wrong numbers to the right ones in the tlt-nd-reference column
 
             (while (< counter2 lines)
-              (let* ((numstring (gnus-strip-whitespace                     ; raw numstring
-                                 (substring-no-properties                   ; with properties removed
-                                  (org-table-get counter2 ref))))            ; of tlt-nd-reference cell in string from: "REF1,REF2,REF3"
+              (let* ((numstring (nth (1- counter2) refs))
                      (refnums (split-string numstring ","))                ; tlt-nd-reference cell in form ("REF1" "REF2" "REF3")
 
                      (wrongnum actnum)                                     ; the wrong number is the actual number in string form (under the above condition)
@@ -215,34 +333,154 @@ Let's say that for some reason, row no. 4 was labelled with "3". So far, the fun
                 (unless (or                                               ; unless the ref field is empty (else the ref field would get the row number of the empty field)
                          (equal numstring "")                             ; that is the empty string
                          (equal numstring "-"))                           ; or "-"
-                  (org-table-put counter2 ref refnums-right-str)          ; put the new string back in the field
+                  (tlt-nd-set-field ref counter2 refnums-right-str)       ; put the new string back in the field
                   (message "counter2: %s, refnums: %s, refnums-right-list: %s, refnums-right-str: %s" counter2 refnums refnums-right-list refnums-right-str))
 
                 (setq counter2 (1+ counter2)))))                           ; in any case, whether changed or not, increment the counter by 1
 
 
-          (setq counter (1+ counter))))   ; whether the tlt-nd-reference numbers were changed or not: increment the counter by 1
+          (setq rownum (1+ rownum)))   ; whether the tlt-nd-reference numbers were changed or not: increment the counter by 1
 
-      ;; Lastly, after every tlt-nd-reference cell has been changed, remove the marks and sort them ;;
+        ;; Lastly, after every tlt-nd-reference cell has been changed, remove the marks and sort them ;;
 
-      (let ((counter3 2))                                                   ; create a third and last counter
-        (while (< counter3 lines)                                           ; and loop over every row
-          (let* ((marked (substring-no-properties
-                          (org-table-get counter3 ref)))
-                 (unmarked (replace-regexp-in-string "m" "" marked))
-                 (sorted (order-string unmarked))
-                 (forms (car (rassoc tlt-nd-formulas cols))))
+        (let ((counter3 2))                                                   ; create a third and last counter
+          (while (< counter3 lines)                                           ; and loop over every row
+            (let* ((marked (tlt-nd-field ref counter3))
 
-            (unless (equal (org-table-get counter3 forms) "")  ; unless the formula cell is empty
-              (org-table-put counter3 ref sorted)))  ; put the new number in there
+                   (unmarked (replace-regexp-in-string "m" "" marked))
+                   (sorted (order-string unmarked))
+                   (forms (car tlt-nd-formulas)))
 
-          (setq counter3 (1+ counter3))))))
+              (unless (equal (org-table-get counter3 forms) "")  ; unless the formula cell is empty
+                (tlt-nd-set-field ref counter3 sorted)))  ; put the new number in there
 
-  (add-hook 'org-ctrl-c-ctrl-c-hook #'adjust-numbers)
+            (setq counter3 (1+ counter3)))))))
 #+END_SRC
 
+#+RESULTS:
+: adjust-numbers
+* Executing Proof Rules
+#+BEGIN_SRC elisp :exports code
+      (defun tlt-nd-find-rule (rulestring)
+        "Return that plist in `tlt-nd-proofrules' one of whose :names is RULESTRING, or an error message."
+        (let ((right-rule)
+              (rulenum (length tlt-nd-proof-rules))
+              (counter 1))
+          (while (<= counter rulenum)
+            (let* ((rulevar (nth (1- counter) tlt-nd-proof-rules))
+                   (rule (eval rulevar)) ; eval necessary because rulevar is just a sign
+                   (rulenames (plist-get rule :names)))
+              (if (member rulestring rulenames)
+                  (progn
+                    (setq right-rule rule)
+                    (setq counter rulenum))
+                (setq counter (1+ counter)))))
+    (if right-rule right-rule
+    (error "No rule called \"%s\" within tlt-nd-proof-rules" rulestring))
+          right-rule))
+
+      (defun tlt-nd-trace-hypotheses (starcol refnums)
+        "Return a list of the starstrings in the rows in REFNUMS, 
+    where STARCOL is the number of the column in which the stars are.
+    STARCOL is an integer, REFNUMS a list of integers."
+        (let ((hyplist))
+          (dolist (ref refnums)
+            (push (tlt-nd-field starcol ref) hyplist))
+          hyplist))
+
+      (defun tlt-nd-count-hyps ()
+        "Return the number of hypotheses in `tlt-nd-table'."
+        (let ((hypcount 0)
+              (counter 1)
+              (lines (length tlt-nd-table)))
+          (while (< counter lines)
+            (let* ((row (tlt-nd-row counter))
+                   (rulecol (1- (car tlt-nd-rule)))
+                   (rule (string-trim-left (nth rulecol row)))
+                   (hypnames (plist-get tlt-nd-rule-hyp :names)))
+              (when (member rule hypnames)
+                (setq hypcount (1+ hypcount)))
+              (setq counter (1+ counter))))
+          hypcount))
+
+      (defun tlt-nd-none (row starcol hyps-total)
+        "Set the starfield in row ROW and column STARCOL to be a string of HYPS-TOTAL occurrences of '-'.
+    ROW, STARCOL and HYPS-TOTAL are integers."
+        (let ((stars-right (make-string hyps-total ?-)))
+          (tlt-nd-set-field starcol row stars-right)
+    stars-right))
+
+      (defun tlt-nd-new (row starcol hypno hyps-total)
+        "Set the starfield in row ROW and column STARCOL to a string of HYPS-TOTAL characters, consisting of occurrences of '-', except for position HYPS-TOTAL, which is '+'.
+    ROW, STARCOL, HYPNO and HYPS-TOTAL are integers."
+        (let ((stars-right (concat " " (fill-star hyps-total (format "%s+" (make-string (1- hypno) ?-))))))
+          (tlt-nd-set-field starcol row stars-right)
+    stars-right))
+
+      (defun tlt-nd-adopt (row starcol refnums)
+        "Adopt the stars of REFNUMS in row ROW and column STARCOL.
+    ROW and STARCOL are integers, REFNUMS is a list of integers."
+        (let ((right-star (tlt-nd-field starcol (car refnums))))
+          (tlt-nd-set-field starcol row right-star)
+    right-star))
+#+END_SRC
+
+** Uniting and intersecting strings   
+Since our hypotheses all start with a whitespace, our initial string should do that, too, so we're adding it. Do keep it at the right length, we just take the first star-string in the list, get its length and subtract it by one.
+
+The idea behind =tlt-nd-intersect= is:
+1. Create a string starting with a whitespace and containing just occurrences of "+" after that.
+2. Loop over the characters of the elements:
+   1. If at position n (the one after the whitespace) of element m is a "-", change the string's "+" at n to a minus.
+      1. If at position n+1 of character m, ....
+   2. If at position n of character m+1, ....
+This way, we're ending up with the string we want.
+
+=tlt-nd-unite= works similarly, we just start of with a string whose characters are, except for the first one, only occurrences of "-", and adding occurrences of "+".
+#+BEGIN_SRC elisp :exports code
+      (defun tlt-nd-intersect (starcol row hyplist)
+        "Return a string such that at position pos, there is a '+' iff 
+          it ouccurs at pos for every element of HYPLIST, and '-' else.
+
+          Assumes that all hyplist have the same length.
+          Supposed to be called after `fill-star'."
+        (let* ((right-star (concat " " (make-string (1- (length (car hyplist))) ?+))))
+          (dolist (stars hyplist)
+            (let ((position 2))
+              (while (<= position (length stars))
+                (let* ((str (tlt-nd-nth-char position stars)))
+                  (when (equal str "-")
+                    (setq right-star 
+                          (delete-star (1- position) right-star))))
+                (setq position (1+ position)))))
+          (tlt-nd-set-field starcol row right-star)))
+
+    (defun tlt-nd-unite (starcol row hyplist)
+      "Return a string such that at position pos, '+' is added iff
+        it occurs at pos for at least one element of STRINGS, and '-' else.
+
+        Assumes that all strings have the same length."
+      (let* ((right-star  (concat " "         ; whitespace to prevent "|-" and, thus, hline
+  (make-string (1- (length (car hyplist))) ?-)))) ; just take the list's first string; they all have the right length anyway
+        (dolist (stars hyplist)
+          (let ((position 2))
+            (while (<= position (length stars))
+              (let* ((str (tlt-nd-nth-char position stars)))
+                (when (equal str "+")
+                  (setq right-star 
+                        (add-star (1- position) right-star))))
+              (setq position (1+ position)))))
+          (tlt-nd-set-field starcol row right-star)))
+#+END_SRC
 * Adjusting the Star Cells
-** Get a List by its nth Member
+** Tracing Function
+#+BEGIN_SRC elisp :exports code
+
+#+END_SRC
+
+#+RESULTS:
+
+** COMMENT Get a List by its nth Member 
 #+BEGIN_SRC elisp :exports code :results nil :tangle natural-deduction.el
   (defun get-by-nth (list n value)
     "Get member of LIST whose Nth member is VALUE.
@@ -269,7 +507,7 @@ Let's say that for some reason, row no. 4 was labelled with "3". So far, the fun
                list n
                (let* ((num (int-to-string n))
                       (digits (length num))
-                      (lastdigit (get-nth-char-in-string digits num)))
+                      (lastdigit (tlt-nd-nth-char digits num)))
                  (cond ((equal lastdigit "1") "st")
                        ((equal lastdigit "2") "nd")
                        ((equal lastdigit "3") "rd")
@@ -277,211 +515,80 @@ Let's say that for some reason, row no. 4 was labelled with "3". So far, the fun
                value))))
 #+END_SRC
 
-#+BEGIN_SRC elisp :exports code :results nil :tangle natural-deduction.el
+#+BEGIN_SRC elisp :exports code :results none :tangle natural-deduction.el
   ;;; Example
   (setq a '((1 2 3) (a 5 7) (b 3 9)))
   (setq n 1)
   (get-by-nth a 2 5)
 #+END_SRC
 
-** Fill the stars
+* Replacing Tables
+At some point, we will need to replace the old table by the new one. The new one is stored in a list, though, so we need a way to make the list a string. The above code does just that: =tlt-nd-make-linestring= makes a string for every row, =tlt-nd-make-table= repeates this for every row to get the whole table. =tlt-ns-insert-table= inserts and aligns the table at point and =tlt-nd-replace-table= replaces the current table by that table.
+#+BEGIN_SRC elisp :exports code
+  (defun tlt-nd-make-linestring (line)
+    "Return the table string of LINE. If LINE is 1, add an h-line-string."
+    (if (= line 1)
+        (concat "|"
+                (string-join (tlt-nd-line line) "|") "|\n|---")
+      (concat "|"
+              (string-join (tlt-nd-line line) "|") "|")))
 
-#+BEGIN_SRC elisp :exports code :results nil :tangle natural-deduction.el
-  (defun fill-stars (starlist)
-    "Fill the stars fields of STARLIST after their last star with occurrences of '-' until the maximum star level.
-  For example, if the maximum level is 4 and the field string is '-+', fill to '-+--'."
-    (let ((value 1)
-          (newlist nil))
-      ;; get length ;;
-      (dolist (element starlist value)
-        (let* ((star (nth 1 element))
-               (length (length star)))
-          (when (> length value)
-            (setq value length))))
+  (defun tlt-nd-make-table ()
+    "Create a table from the data stored in `tlt-nd-table'."
+    (let ((line 1)
+          (length (length tlt-nd-table))
+          (table ""))
+      (while (<= line length)
+        (setq table 
+              (concat table (tlt-nd-make-linestring line) "\n"))
+        (setq line (1+ line)))
+      table))
 
-      (dolist (element starlist newlist)
-        (let* ((row (nth 0 element))
-               (star (nth 1 element))
-               (length (length star))
-               (diff (- value length))
-               (changed (concat star (make-string diff ?-))))
-          (push (list row changed) newlist))
-        newlist)))
+  (defun tlt-nd-insert-table ()
+    "Insert the table stored in `tlt-nd-table' at point."
+    (save-excursion
+      (insert (tlt-nd-make-table))
+      (org-table-align)))
+
+  (defun tlt-nd-replace-table ()
+    "Delete the table at point and replace it with the table stored in `tlt-nd-table'."
+    (let ((marker (point))
+          (beg (org-table-begin))
+          (end (org-table-end)))
+      (delete-region beg end)
+      (tlt-nd-insert-table)
+      (goto-char marker)
+      (re-search-forward "[^|]*" )
+      (skip-chars-backward "\s\t")))
 #+END_SRC
 
-** get the correct Hypotheses
-#+BEGIN_SRC elisp :exports code :results nil :tangle natural-deduction.el
-  (defun get-hypcorrects ()
-    "For the table at point, return a list whose members are of the form (ROW OLD NEW).
-      ROW is the row in which the hypothesis is, OLD the position of the star in that hypothesis
-      and NEW the position where the star should be."
-    (let* ((cols (get-colnames))                         ; (... (2. "Zeile") ... (4. "Bezug"))
-           (rulecol (car (rassoc tlt-nd-rule cols)))     ; rulename column, returns 5
-           (lines (length org-table-dlines))             ; number of lines +1
-           (row (- lines 2))                             ; because the first star row is line 2
-           (starcol (car (rassoc tlt-nd-stars cols)))    ; star column, returns 1
-           (stars (get-column starcol row 'stars))       ; stars
-           (starcounter (length stars))                  ; number of stars for looping
-           (rules (get-column rulecol row 'both))        ; rules
-           (case-fold-search nil)                        ; relevant if tlt-nd-capitalize is nil
-           (hyps (abstract-column stars rules tlt-nd-hyp))
-           (star-level-right 1)
-           (hypcorrects nil)                             ; info about how the hypotheses got replaced
-           (lockedrows nil)                             ; info about how the rows not to be touched
-           (changed-stars stars)
-           (how-many-hyps (length hyps)))                ; the number of hypotheses - where the loop should stop
+#+RESULTS:
+: tlt-nd-replace-table
 
+#+BEGIN_SRC elisp :exports code
+  (defun tlt-nd-get-longest-string (strlist)
+    "Return length of longest string in STRLIST."
+    (let ((length 0))
+      (dolist (str strlist)
+        (let ((strlength (length str)))
+          (if (> strlength length)
+              (setq length strlength)
+            )))
+      length))
 
-      ;;  At this point, we have three important lists. An example:  ;;
-      ;;  STARS: (setq stars '((1 "-+")  (2 "++") (3 "+")))          ;;
-      ;;  RULES: (setq rules '((1 "Hyp") (2 "$E\\to$") (3 "Hyp")))   ;;
-      ;;  HYPS:  (setq hyps '((1 "-+") (3 "+")))                     ;;
-
-      ;; First step: Check whether the hypothesis in question is the right level.
-      ;; Since we have trimmed the hypothesis strings correctly, its length corresponds
-      ;; to its level. Since we ordered the hypothesis list, too, the index says of which
-      ;; level the hypothesis should be: (1 HYP) must be of length 1, (2 HYP) of length 2 etc. ;;
-      ;; This is why `star-level-right' is both the index and the star level we need  ;;
-
-
-      (while (<= star-level-right how-many-hyps)
-        (let* ((star-level-sub (1- star-level-right)) ; because we use `nth' and `nth' is zero-based
-               (hypnum (nth star-level-sub hyps))     ; the hypothesis of number `star-level-right'; e.g. (1 "+"), (2 "-+") etc.;
-               (hyprow (nth 0 hypnum))                ; the hypothesis row number; e.g. 1, 2, etc.
-               (hypstring (nth 1 hypnum))             ; the star string of the hypothesis, e.g. "+" from (1 "+")
-               (star-level-act (length hypstring)))   ; the ACTUAL star-level; possibly wrong; explanation above
-
-          ;; If the number of characters in the hypothesis string is identical ;;
-          ;; with the number of the counter `star-level-right', move on.       ;;
-
-          (unless (equal star-level-act star-level-right)
-
-            ;; If that is not the case, make a hypothesis correction list ;;
-            ;; Form: (HYPNUMBER OLD NEW). Example: (2 3 2) ;;
-            ;; hypothesis in row 2, is level 3, should be level 2
-
-            (let ((wrong-star (1+ (string-match "+" hypstring))) ; +1 because string-match is zero-based
-                  (right-star star-level-right)
-                  (minuses (1- star-level-right))) ; because we need one "-" less than level; e.g. "-+", one minus, level 2!
-
-              ;; now create the hypothesis correction list            ;;
-              ;; and change the hypotheses to be of the correct level ;;
-              ;; (this can be done directly)                          ;;
-
-              (push (list wrong-star right-star) hypcorrects)
-              ;; try: do not change the hypothesis correction list ;;
-              (setf (nth 1 (assoc hyprow changed-stars))
-                    (format "%s+" (make-string minuses ?-)))))
-          (push hyprow lockedrows))
-
-        (setq star-level-right (1+ star-level-right)))
-
-      (list (fill-stars changed-stars)
-            (reverse hypcorrects)
-            (reverse lockedrows)
-            ))) ; reverse because first item is
+  (defun fill-star (num starstr)
+    "Fill the stars fields of STARLIST after their last star with occurrences of '-' until the maximum star level. If NUM is the the length of STARSTR, return STARSTR.
+Examples: 
+num 4, starstr'-+' → '-+--'.
+num 2, starstr'-++' → '-++'."
+    (let* ((length (length starstr))
+           (diff (- num length)))
+      (if (> diff 0)
+        (concat starstr
+                (make-string diff ?-))
+  starstr)))
 #+END_SRC
 
-** Replace Stars
-#+BEGIN_SRC elisp :exports code :results nil :tangle natural-deduction.el
-  (defun replace-stars (wrong-star right-star str rightplus)
-    "Replace '+' at position WRONG-STAR in STR by '-' and, if RIGHTPLUS it non-nil,
-    replace '-' at position RIGHT-STAR in STR by '+'."
-    ;; replace the wrong-star by a "-"
-    (let ((out (replace-regexp-in-string  ; replace any "+" at level star-level-act
-                (format "\\(^[\\+\\-]\\{%d\\}\\)\\(\\+\\)\\([\\+\\|\\-]*\\)" (1- wrong-star)) ; 1- because we exclude them so the first char is the star level
+#+RESULTS:
+: fill-star
 
-                ;;  first group: all occurrences of "+" or "-" until, excluding, `right-star' - anything before
-                ;;  second group: exactly one occurrence of "+" or "-": the one to replace  ;;
-                ;;  third group: zero or more occurrences of "+" or "-"  - anything after              ;;
-                "\\1-\\3" ; the wrong star is replaced by a "-"
-                ;;  first group, second group replaced by ";%d;", third group          ;;
-                str)))
-      ;; set the right-star to be "+" if that is not already the case ;;
-      (if rightplus out
-        (replace-regexp-in-string  ; replace any "+" at level star-level-act by ";star-amount;" if it exists
-         (format "\\(^[\\+\\-]\\{%d\\}\\)\\([\\+\\|\\-]\\)\\([\\+\\|\\-]*\\)" (1- right-star)) ; 1- because we exclude them so the first char is the star level
-
-         ;;  first group: all occurrences of "+" or "-" until, excluding, `right-star' - anything before
-         ;;  second group: exactly one occurrence of "+" or "-": the one to replace  ;;
-         ;;  third group: zero or more occurrences of "+" or "-"  - anything after              ;;
-         "\\1+\\3" ; the wrong star is replaced by a "-"
-         ;;  first group, second group replaced by ";%d;", third group          ;;
-         out))))
-
-  (defun delete-star (wrong-star str)
-    "Replace '+' at position WRONG-STAR in STR by '-' and, if RIGHTPLUS it non-nil,
-    replace '-' at position RIGHT-STAR in STR by '+'."
-    ;; replace the wrong-star by a "-"
-    (replace-regexp-in-string  ; replace any "+" at level star-level-act
-     (format "\\(^[\\+\\-]\\{%d\\}\\)\\(\\+\\)\\([\\+\\|\\-]*\\)" (1- wrong-star)) ; 1- because we exclude them so the first char is the star level
-
-     ;;  first group: all occurrences of "+" or "-" until, excluding, `right-star' - anything before
-     ;;  second group: exactly one occurrence of "+" or "-": the one to replace  ;;
-     ;;  third group: zero or more occurrences of "+" or "-"  - anything after              ;;
-     "\\1-\\3" ; the wrong star is replaced by a "-"
-     ;;  first group, second group replaced by ";%d;", third group          ;;
-     str))
-
-  (defun add-star (right-star str)
-    "Replace '+' at position WRONG-STAR in STR by '-' and, if RIGHTPLUS it non-nil,
-    replace '-' at position RIGHT-STAR in STR by '+'."
-    (replace-regexp-in-string  ; replace any "+" at level star-level-act by ";star-amount;" if it exists
-     (format "\\(^[\\+\\-]\\{%d\\}\\)\\([\\+\\|\\-]\\)\\([\\+\\|\\-]*\\)" (1- right-star)) ; 1- because we exclude them so the first char is the star level
-
-     ;;  first group: all occurrences of "+" or "-" until, excluding, `right-star' - anything before
-     ;;  second group: exactly one occurrence of "+" or "-": the one to replace  ;;
-     ;;  third group: zero or more occurrences of "+" or "-"  - anything after              ;;
-     "\\1+\\3" ; the wrong star is replaced by a "-"
-     ;;  first group, second group replaced by ";%d;", third group          ;;
-     str))
-#+END_SRC
-
-
-#+BEGIN_SRC elisp :exports code :results nil :tangle natural-deduction.el
-  (replace-stars 2 3 "++-+" nil) ; remove star at pos 2, add star at pos 3
-#+END_SRC
-
-** Correct Stars
-#+BEGIN_SRC elisp :exports code :results nil :tangle natural-deduction.el
-  (defun correct-stars (hypinfo)
-    "Returns the correct list of stars for every line based on HYPINFO.
-            HYPINFO is a list containing the lists CHANGESTARS and HYPCORRECTS. CHANGESSTARS's members are of the form
-            (ROWNUMBER STARSRING), where RUWONUMBER is the rownumber the hypothesis appears
-            and STARSTRING is the star field ocurring in that line. An example is (3 '-+').
-            The hypotheses are already corrected, but the rest of the star fields is not.
-            HYPCORRECTS's members are of the form (ROWNUMBER OLD NEW) where ROWNUMBER is the number the
-            hypothesis to be changed is in, OLD the current star level and NEW the correct star level.
-
-          Meant to take the value of `get-hypcorrects' as its argument."
-    (let* ((starlist (nth 0 hypinfo))         ; the list of stars, hypotheses already corrected
-           (hypcorrections (nth 1 hypinfo))   ; the list of hypothesis corrections
-           (corrections hypcorrections)       ; the correction list starts with the hypotheses
-           (locked-rows (nth 2 hypinfo))      ; the list of stars not to be altered anymore
-           (rowamount (1+ (length starlist))) ; the number of star rows
-           (changed-stars starlist)
-           (corrected-stars)
-           (row 1))
-
-      (while (< row rowamount)  ; for every row
-
-        (dolist (correct corrections)
-          (let* ((wrong-star (nth 0 correct))   ; the wrong position of the star, e.g. 2 for "-+-"
-                 (right-star (nth 1 correct))  ; the correct position of the star, e.g. 3 for "-+-"
-                 (star (nth (- rowamount row 1) changed-stars))       ; take its star info e.g. (4 "-+-") | since the stars are orderd by row
-                 (starstring (nth 1 star))                ; and extract the star string, e.g. "-+-"
-                 (replace (equal (get-nth-char-in-string wrong-star starstring) "+")) ; whether at the position to replace, there already is a star
-                 (starfield (assoc row corrected-stars)))
-
-            (cond ((member row locked-rows) nil)
-                  ((not replace) (setf (nth (- rowamount row 1) changed-stars) (list row (delete-star wrong-star starstring))))
-
-                  (t (let* ((del-star (delete-star wrong-star starstring))
-                            (finish-star (add-star right-star del-star)))
-                       (setf (nth (- rowamount row 1) changed-stars) (list row (add-star right-star starstring)
-                                                                           )))))))
-
-        (setq row (1+ row)))
-
-      changed-stars)) ; return the changed starlis
-#+END_SRC
